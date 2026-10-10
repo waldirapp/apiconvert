@@ -36,7 +36,7 @@ Divergência conhecida: o openpyxl grava como célula do tipo erro o texto que �
 
 ## Imagem em WebP (`POST /webp`)
 
-Converte uma imagem em WebP com o mesmo resultado do `cwebp` que o x-duall usa (`cwebp -q 50 -m 6 -jpeg_like -mt -resize`, com o lado maior em 400 px e o outro proporcional; imagem quadrada vai a 400×400 e imagem menor é ampliada) e devolve o WebP em base64, o formato que o x-duall grava no campo da imagem. A libwebp é compilada dentro do binário; não há processo externo.
+Converte uma imagem em WebP com o resultado do `cwebp` que o x-duall usa (`cwebp -q 50 -m 6 -jpeg_like -mt -resize`, com o lado maior em 400 px e o outro proporcional; imagem quadrada vai a 400×400 e imagem menor é ampliada) e devolve o WebP em base64, o formato que o x-duall grava no campo da imagem. A libwebp é compilada dentro do binário; não há processo externo.
 
 | Item | Contrato |
 |---|---|
@@ -46,6 +46,8 @@ Converte uma imagem em WebP com o mesmo resultado do `cwebp` que o x-duall usa (
 | Query | `max`: lado maior (padrão `400`; `0` mantém o tamanho; até `4096`). `q`: qualidade de 0 a 100 (padrão `50`) |
 | 200 | `text/plain; charset=utf-8`: WebP em base64 padrão, sem quebra de linha |
 | Erros | JSON `{"erro", "codigo"}`: 400 `imagem_vazia` ou `parametro_invalido`, 401 `nao_autorizado`, 413 `imagem_grande_demais`, 415 `formato_nao_suportado`, 422 `imagem_invalida`, 503 `ocupado`, 504 `tempo_esgotado` |
+
+Divergência intencional: imagem com transparência usa `-m 4` em vez de `-m 6`. No método 6 a compressão sem perdas do canal alfa levava de 1,4 a 6 s por imagem no servidor (o próprio `cwebp` do legado leva 3,5 s numa delas); no 4 leva milissegundos, com arquivo cerca de 5% maior e sem diferença visível. Imagem sem transparência (inclusive PNG com alfa todo opaco) segue no método 6.
 
 Comparado com o `cwebp` 1.2.1 do legado nas mesmas 14 imagens (PNG e JPEG, de 32×32 a 3840×2160), as dimensões foram iguais em todas e o tamanho variou menos de 0,5%. Nas PNG o resultado decodificado foi idêntico pixel a pixel; nas JPEG a diferença vem do decodificador de JPEG, com PSNR entre as duas saídas de 36 a 46 dB. `examples/webp_fidelidade.rs` refaz a comparação.
 
