@@ -36,7 +36,7 @@ Divergência conhecida: o openpyxl grava como célula do tipo erro o texto que �
 
 ## Imagem em WebP (`POST /webp`)
 
-Converte uma imagem em WebP com o resultado do `cwebp` que o x-duall usa (`cwebp -q 50 -m 6 -jpeg_like -mt -resize`, com o lado maior em 400 px e o outro proporcional; imagem quadrada vai a 400×400 e imagem menor é ampliada) e devolve o WebP em base64, o formato que o x-duall grava no campo da imagem. A libwebp é compilada dentro do binário; não há processo externo.
+Converte uma imagem em WebP com o resultado do `cwebp` que o x-duall usa (`cwebp -q 50 -m 6 -jpeg_like -mt -resize`, exceto `-m 4` em imagem com transparência, ver abaixo; com o lado maior em 400 px e o outro proporcional; imagem quadrada vai a 400×400 e imagem menor é ampliada) e devolve o WebP em base64, o formato que o x-duall grava no campo da imagem. A libwebp é compilada dentro do binário; não há processo externo.
 
 | Item | Contrato |
 |---|---|
