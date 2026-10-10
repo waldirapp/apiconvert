@@ -39,7 +39,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::multipart::MultipartRejection;
@@ -64,23 +64,45 @@ struct Entry {
     created: Instant,
 }
 
+#[derive(Default)]
+struct Entries {
+    /// Resultado por nome primário (o nome de saída derivado do enviado).
+    primary: HashMap<String, Entry>,
+    /// Nome devolvido ao cliente (Latin-1, com '?') -> nome primário. Não
+    /// conta nos tetos e nunca substitui um resultado existente.
+    aliases: HashMap<String, String>,
+}
+
+impl Entries {
+    fn purge(&mut self, ttl: Duration) {
+        self.primary.retain(|_, e| e.created.elapsed() < ttl);
+        self.drop_orphan_aliases();
+    }
+
+    fn drop_orphan_aliases(&mut self) {
+        let primary = &self.primary;
+        self.aliases.retain(|_, p| primary.contains_key(p));
+    }
+}
+
 /// Resultados convertidos, por nome, à espera do `GET`.
 pub(crate) struct Store {
     cfg: CompatStore,
-    entries: Mutex<HashMap<String, Entry>>,
+    entries: Mutex<Entries>,
 }
 
 impl Store {
     fn new(cfg: CompatStore) -> Self {
         Self {
             cfg,
-            entries: Mutex::new(HashMap::new()),
+            entries: Mutex::new(Entries::default()),
         }
     }
 
-    fn purge_expired(&self, map: &mut HashMap<String, Entry>) {
-        let ttl = self.cfg.ttl;
-        map.retain(|_, e| e.created.elapsed() < ttl);
+    fn lock(&self) -> std::sync::MutexGuard<'_, Entries> {
+        let mut e = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        e.purge(self.cfg.ttl);
+        e
     }
 
     /// Guarda o resultado; `false` quando ele sozinho passa do teto de bytes.
@@ -88,8 +110,8 @@ impl Store {
         if xlsx.len() > self.cfg.max_bytes {
             return false;
         }
-        let mut map = self.entries.lock().unwrap_or_else(|p| p.into_inner());
-        self.purge_expired(&mut map);
+        let mut entries = self.lock();
+        let map = &mut entries.primary;
         // O mesmo nome substitui o anterior, como o arquivo sobrescrito no legado.
         map.remove(&name);
         let mut total: usize = map.values().map(|e| e.xlsx.len()).sum();
@@ -115,13 +137,30 @@ impl Store {
                 created: Instant::now(),
             },
         );
+        entries.drop_orphan_aliases();
         true
     }
 
+    /// Registra `alias` para o resultado `primary`, se o nome estiver livre:
+    /// um resultado ou alias existente com esse nome é preservado.
+    fn put_alias(&self, alias: String, primary: &str) {
+        let mut entries = self.lock();
+        if entries.primary.contains_key(&alias) || entries.aliases.contains_key(&alias) {
+            return;
+        }
+        if entries.primary.contains_key(primary) {
+            entries.aliases.insert(alias, primary.to_string());
+        }
+    }
+
     fn get(&self, name: &str) -> Option<Bytes> {
-        let mut map = self.entries.lock().unwrap_or_else(|p| p.into_inner());
-        self.purge_expired(&mut map);
-        map.get(name).map(|e| e.xlsx.clone())
+        let entries = self.lock();
+        let key = if entries.primary.contains_key(name) {
+            name
+        } else {
+            entries.aliases.get(name)?.as_str()
+        };
+        entries.primary.get(key).map(|e| e.xlsx.clone())
     }
 }
 
@@ -290,8 +329,9 @@ async fn post_convert(
             let xlsx = Bytes::from(xlsx);
             let returned = latin1(&out_name);
             // O nome devolvido é o Latin-1 do nome enviado (caractere fora dele
-            // vira '?'). O resultado fica também sob esse nome exato, para o
-            // GET de quem usa o nome recebido funcionar.
+            // vira '?'). Esse nome exato vira um alias do resultado, para o GET
+            // de quem usa o nome recebido funcionar, sem tomar o lugar de outro
+            // resultado que já tenha esse nome.
             let alias: String = returned.iter().map(|&b| char::from(b)).collect();
             if !st.store.put(out_name.clone(), xlsx.clone()) {
                 tracing::warn!(
@@ -301,7 +341,7 @@ async fn post_convert(
                 return erro_gravar();
             }
             if alias != out_name {
-                st.store.put(alias, xlsx);
+                st.store.put_alias(alias, &out_name);
             }
             let mut resp = (StatusCode::OK, returned).into_response();
             let h = resp.headers_mut();
@@ -394,7 +434,6 @@ async fn get_convert(State(st): State<CompatState>, uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn nome_de_saida_como_changefileext() {

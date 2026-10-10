@@ -72,6 +72,9 @@ pub(crate) fn write_xlsx(
         }
     }
 
+    // A serialização do rust_xlsxwriter não é interrompível; o prazo é
+    // conferido antes dela, e o custo dela é limitado pelo teto de células.
+    limits.check_deadline()?;
     workbook.save_to_buffer().map_err(|_| ConvertError::Write)
 }
 

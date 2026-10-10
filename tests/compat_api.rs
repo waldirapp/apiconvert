@@ -172,6 +172,39 @@ async fn nome_fora_de_latin1_volta_com_interrogacao_e_o_get_desse_nome_funciona(
 }
 
 #[tokio::test]
+async fn alias_nao_substitui_resultado_com_o_mesmo_nome() {
+    let app = app();
+    // 1º: "a?.xls" devolve "a?.xlsx" (nome primário)
+    let (_, _, body) = send(&app, post_multipart(multipart("f", Some(b"a?.xls"), XLS))).await;
+    assert_eq!(body, b"a?.xlsx");
+    let get = |q: &'static str| Request::get(q).body(Body::empty()).unwrap();
+    let (_, _, primeiro) = send(&app, get("/convert?file=a%3F.xlsx")).await;
+
+    // 2º: "a€.xls" também devolve "a?.xlsx", com outra planilha
+    let mut wb = rust_xlsxwriter::Workbook::new();
+    let s = wb.add_worksheet();
+    s.write_string(0, 0, "H").unwrap();
+    s.write_string(1, 0, "outra").unwrap();
+    let outra = wb.save_to_buffer().unwrap();
+    let (st, _, body) = send(
+        &app,
+        post_multipart(multipart("f", Some("a€.xls".as_bytes()), &outra)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body, b"a?.xlsx");
+
+    // o primeiro resultado continua sob o nome dele
+    let (st, _, depois) = send(&app, get("/convert?file=a%3F.xlsx")).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(primeiro, depois);
+    // e o segundo segue baixável pelo nome primário (UTF-8)
+    let (st, _, segundo) = send(&app, get("/convert?file=a%E2%82%AC.xlsx")).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_ne!(primeiro, segundo);
+}
+
+#[tokio::test]
 async fn get_inexistente_ou_sem_parametro_404_do_legado() {
     let app = app();
     for uri in ["/convert?file=tmpZZZZ.xlsx", "/convert", "/convert?outro=1"] {

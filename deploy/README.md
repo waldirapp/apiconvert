@@ -33,6 +33,14 @@ systemctl stop xlsconvert-ensaio
 
 ## Troca
 
+`deploy/trocar.sh` faz a troca com verificação ponta a ponta e volta ao legado sozinho se algo falhar (binário novo em `/opt/xlsconvert/xlsconvert.new`):
+
+```bash
+bash deploy/trocar.sh planilha_de_teste.xls
+```
+
+Passo a passo manual equivalente:
+
 ```bash
 systemctl stop <servico-legado> && systemctl disable <servico-legado>
 systemctl enable --now xlsconvert-apiconvert
