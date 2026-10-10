@@ -151,10 +151,7 @@ async fn planilha_pela_tela_mostra_previa_e_baixa_pelo_id() {
     assert!(html.contains("Relatório NF.xlsx"));
     assert!(html.contains("<table>"));
     // Data na prévia como data, não como número serial.
-    assert!(
-        html.contains("2026-10-10 00:00:00") || html.contains("-") && !html.contains(">46305<"),
-        "{html}"
-    );
+    assert!(html.contains("<td>2026-10-10 00:00:00</td>"), "{html}");
     let id = id_download(&html);
     assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
 
@@ -203,6 +200,25 @@ async fn imagem_pela_tela_mostra_webp_base64_e_transparencia() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(h.get("content-type").unwrap(), "image/webp");
     assert_eq!(&webp[8..12], b"WEBP");
+}
+
+#[tokio::test]
+async fn imagem_opaca_aparece_como_metodo_6() {
+    let app = apiconvert();
+    let img = DynamicImage::ImageRgba8(RgbaImage::from_fn(60, 30, |x, y| {
+        Rgba([x as u8 * 4, y as u8 * 8, 90, 255])
+    }));
+    let mut png = Cursor::new(Vec::new());
+    img.write_to(&mut png, ImageFormat::Png).unwrap();
+    let (st, _, body) = send(
+        &app,
+        para(form("foto.png", &png.into_inner(), &[]), "/ui/imagem"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let html = texto(&body);
+    assert!(html.contains("não (método 6)"), "{html}");
+    assert!(html.contains("400×200"), "{html}");
 }
 
 #[tokio::test]

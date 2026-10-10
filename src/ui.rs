@@ -523,21 +523,26 @@ async fn converter_planilha(State(st): State<UiState>, req: Request) -> Response
     let limits: Limits = st.cfg.limits.with_timeout(st.cfg.timeout);
     let inicio = Instant::now();
     let arquivo = form.arquivo;
-    let saida = match executar(st.cfg.timeout, permit, move || {
-        convert::convert(&arquivo, limits)
-    })
-    .await
-    {
-        Ok(Ok(x)) => x,
-        Ok(Err(e)) => {
-            tracing::info!(bytes = entrada, "tela: planilha recusada: {e}");
-            return erro(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                &primeira_maiuscula(&e.to_string()),
-            );
-        }
-        Err(r) => return r.into_response(),
-    };
+    // A prévia lê o .xlsx gerado: roda na mesma tarefa, com a vaga e o prazo.
+    let (saida, (linhas, colunas, celulas, cortada, colunas_previa)) =
+        match executar(st.cfg.timeout, permit, move || {
+            convert::convert(&arquivo, limits).map(|x| {
+                let p = previa(&x);
+                (x, p)
+            })
+        })
+        .await
+        {
+            Ok(Ok(x)) => x,
+            Ok(Err(e)) => {
+                tracing::info!(bytes = entrada, "tela: planilha recusada: {e}");
+                return erro(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    &primeira_maiuscula(&e.to_string()),
+                );
+            }
+            Err(r) => return r.into_response(),
+        };
     let tempo_ms = inicio.elapsed().as_millis();
     tracing::info!(
         bytes = entrada,
@@ -546,7 +551,6 @@ async fn converter_planilha(State(st): State<UiState>, req: Request) -> Response
         "tela: planilha convertida"
     );
 
-    let (linhas, colunas, celulas, cortada, colunas_previa) = previa(&saida);
     let bytes_saida = tamanho(saida.len());
     let Some(id) = st
         .resultados
@@ -605,6 +609,11 @@ fn texto_celula(c: &calamine::Data) -> String {
     }
 }
 
+/// O WebP tem canal alfa: cabeçalho `VP8X` com o bit de alfa (0x10).
+fn webp_tem_alfa(webp: &[u8]) -> bool {
+    webp.len() > 20 && &webp[12..16] == b"VP8X" && webp[20] & 0x10 != 0
+}
+
 fn primeira_maiuscula(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
@@ -655,12 +664,18 @@ async fn converter_imagem(State(st): State<UiState>, req: Request) -> Response {
     let max_pixels = st.cfg.webp_max_pixels;
     let inicio = Instant::now();
     let arquivo = form.arquivo;
+    // Dimensões pelos cabeçalhos e base64 na mesma tarefa, com a vaga e o prazo.
     let r = executar(st.cfg.timeout, permit, move || {
         let orig = webp::dimensions(&arquivo);
-        webp::to_webp(&arquivo, &params, max_pixels).map(|out| (orig, out))
+        webp::to_webp(&arquivo, &params, max_pixels).map(|out| {
+            let dims = webp::dimensions(&out);
+            let alfa = webp_tem_alfa(&out);
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&out);
+            (orig, dims, alfa, b64, out)
+        })
     })
     .await;
-    let ((orig, out), tempo_ms) = match r {
+    let ((orig, dims, transparente, base64, out), tempo_ms) = match r {
         Ok(Ok(v)) => (v, inicio.elapsed().as_millis()),
         Ok(Err(e)) => {
             tracing::info!(bytes = entrada, "tela: imagem recusada: {e}");
@@ -681,17 +696,13 @@ async fn converter_imagem(State(st): State<UiState>, req: Request) -> Response {
         "tela: imagem convertida"
     );
 
-    let (largura, altura, transparente) =
-        image::load_from_memory_with_format(&out, image::ImageFormat::WebP)
-            .map(|i| (i.width(), i.height(), i.color().has_alpha()))
-            .unwrap_or((0, 0, false));
+    let (largura, altura) = dims.unwrap_or((0, 0));
     let (largura_orig, altura_orig) = orig.unwrap_or((0, 0));
     let reducao = if entrada > 0 {
         format!("{:.0}%", 100.0 - out.len() as f64 * 100.0 / entrada as f64)
     } else {
         "—".into()
     };
-    let base64 = base64::engine::general_purpose::STANDARD.encode(&out);
     let bytes_saida = tamanho(out.len());
     let Some(id) = st
         .resultados
