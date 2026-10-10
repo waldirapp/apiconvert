@@ -1,0 +1,30 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: pt-BR
+reviews:
+  profile: assertive
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    - "!Cargo.lock"
+    - "!tests/fixtures/*.xls"
+  path_instructions:
+    - path: "src/convert/**"
+      instructions: >-
+        O contrato é reproduzir exatamente pandas 2.2.3 + xlrd 2.0.1 +
+        openpyxl 3.1.5 (read_excel seguido de to_excel com index=False e
+        header=False). Divergência do pandas é defeito, mesmo que o resultado
+        pareça "mais correto". Cada regra deve citar a função de origem.
+    - path: "src/app.rs"
+      instructions: >-
+        Serviço interno: token obrigatório com comparação em tempo constante,
+        falha fechada, sem conteúdo de arquivo nem token em log ou resposta de
+        erro, limites de corpo, concorrência e tempo.
+    - path: "tools/fidelidade/**"
+      instructions: >-
+        O harness roda sobre arquivos sensíveis: sem --valores, nada de
+        conteúdo de célula no relatório; token fora da linha de comando;
+        temporários removidos no fim.

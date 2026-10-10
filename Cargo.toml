@@ -1,0 +1,31 @@
+[package]
+name = "xlsconvert"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Conversão de planilha .xls/.xlsx em .xlsx com o mesmo resultado de pandas.read_excel + DataFrame.to_excel (pandas 2.2.3)"
+license = "MIT"
+repository = "https://github.com/waldirapp/xlsconvert"
+publish = false
+
+[dependencies]
+axum = "0.8"
+calamine = { version = "0.36", features = ["dates"] }
+cfb = "0.15"
+rust_xlsxwriter = "0.99"
+subtle = "2.6"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
