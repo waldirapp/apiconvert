@@ -17,6 +17,9 @@
 //! `-resize`, redimensionada por `WebPPictureRescale` e codificada com a mesma
 //! configuração. Os bytes podem diferir do `cwebp` 1.2.1 do servidor por causa
 //! da versão da libwebp; o resultado visual é o mesmo.
+//!
+//! Divergência intencional: imagem com transparência usa `-m 4` em vez de
+//! `-m 6` (ver `method_for`).
 
 use std::io::Cursor;
 
@@ -75,7 +78,7 @@ pub fn to_webp(input: &[u8], params: &WebpParams, max_pixels: u64) -> Result<Vec
     let img = decode(input, max_pixels)?;
     let (w, h) = (img.width(), img.height());
     let (rw, rh) = resize_dims(w, h, params.max_side);
-    encode(img, rw, rh, params.quality)
+    encode(img, rw, rh, params.quality, method_for)
 }
 
 fn reader(input: &[u8]) -> Result<ImageReader<Cursor<&[u8]>>, WebpError> {
@@ -131,6 +134,18 @@ pub fn resize_dims(w: u32, h: u32, max_side: u32) -> (u32, u32) {
     }
 }
 
+/// `-m` do legado (6), exceto em imagem com transparência: ali o método 6
+/// faz a compressão sem perdas do canal alfa levar segundos (de 1,4 a 6 s
+/// por imagem de 400 px no servidor, contra 0,04 s no método 4), com ganho de
+/// cerca de 5% no tamanho. Divergência intencional em relação ao `cwebp`.
+pub fn method_for(transparente: bool) -> i32 {
+    if transparente {
+        4
+    } else {
+        6
+    }
+}
+
 /// Libera a imagem e o buffer da libwebp em qualquer saída.
 struct Encoding {
     pic: sys::WebPPicture,
@@ -148,16 +163,17 @@ impl Drop for Encoding {
     }
 }
 
-fn encode(img: DynamicImage, rw: u32, rh: u32, quality: f32) -> Result<Vec<u8>, WebpError> {
+fn encode(
+    img: DynamicImage,
+    rw: u32,
+    rh: u32,
+    quality: f32,
+    method: fn(bool) -> i32,
+) -> Result<Vec<u8>, WebpError> {
     let mut config = sys::WebPConfig::new().map_err(|_| WebpError::Encode)?;
     config.quality = quality;
-    config.method = 6; // -m 6
     config.emulate_jpeg_size = 1; // -jpeg_like
     config.thread_level = 1; // -mt
-                             // SAFETY: `config` foi inicializada por `WebPConfig::new`.
-    if unsafe { sys::WebPValidateConfig(&config) } == 0 {
-        return Err(WebpError::Encode);
-    }
 
     let width = i32::try_from(img.width()).map_err(|_| WebpError::TooLarge)?;
     let height = i32::try_from(img.height()).map_err(|_| WebpError::TooLarge)?;
@@ -196,6 +212,14 @@ fn encode(img: DynamicImage, rw: u32, rh: u32, quality: f32) -> Result<Vec<u8>, 
         if unsafe { sys::WebPPictureRescale(&mut enc.pic, rw, rh) } == 0 {
             return Err(WebpError::Encode);
         }
+    }
+
+    // SAFETY: `pic` contém a imagem final (importada e redimensionada).
+    let transparente = unsafe { sys::WebPPictureHasTransparency(&enc.pic) } != 0;
+    config.method = method(transparente);
+    // SAFETY: `config` foi inicializada por `WebPConfig::new`.
+    if unsafe { sys::WebPValidateConfig(&config) } == 0 {
+        return Err(WebpError::Encode);
     }
 
     enc.pic.writer = Some(sys::WebPMemoryWrite);
@@ -269,6 +293,40 @@ mod tests {
         };
         let out = to_webp(&png(gradiente(123, 45)), &p, 1 << 30).unwrap();
         assert_eq!(webp_dims(&out), (123, 45));
+    }
+
+    #[test]
+    fn metodo_4_so_com_transparencia() {
+        assert_eq!(method_for(false), 6);
+        assert_eq!(method_for(true), 4);
+    }
+
+    #[test]
+    fn transparente_usa_metodo_4_e_opaco_metodo_6() {
+        let com_alfa = DynamicImage::ImageRgba8(RgbaImage::from_fn(48, 48, |x, y| {
+            let d = (x as i32 - 24).pow(2) + (y as i32 - 24).pow(2);
+            Rgba([
+                (x * 5) as u8,
+                (y * 5) as u8,
+                200,
+                if d < 400 { 255 } else { 0 },
+            ])
+        }));
+        let gerar = |img: &DynamicImage, m: fn(bool) -> i32| {
+            encode(img.clone(), 400, 400, 50.0, m).unwrap()
+        };
+        let saida = to_webp(&png(com_alfa.clone()), &WebpParams::default(), 1 << 30).unwrap();
+        assert_eq!(saida, gerar(&com_alfa, |_| 4));
+        assert_ne!(saida, gerar(&com_alfa, |_| 6));
+
+        // RGBA com alfa todo 255 não tem transparência: segue o método 6.
+        let opaco = DynamicImage::ImageRgba8(RgbaImage::from_fn(64, 64, |x, y| {
+            let h = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503);
+            Rgba([(h >> 24) as u8, (h >> 16) as u8, (x * 4) as u8, 255])
+        }));
+        let saida = to_webp(&png(opaco.clone()), &WebpParams::default(), 1 << 30).unwrap();
+        assert_eq!(saida, gerar(&opaco, |_| 6));
+        assert_ne!(saida, gerar(&opaco, |_| 4));
     }
 
     #[test]
