@@ -1,5 +1,5 @@
-//! Escrita do `.xlsx` como `DataFrame.to_excel(index=False, header=False)`
-//! com o motor openpyxl.
+//! Escrita do `.xlsx` como `DataFrame.to_excel(index=False)` com o motor
+//! openpyxl: 1ª linha com os nomes das colunas, dados a partir da 2ª.
 //!
 //! Fontes reproduzidas:
 //! - `pandas/io/formats/excel.py::ExcelFormatter._format_value`: nulo vira
@@ -15,11 +15,15 @@
 //!   gravado como fórmula; caractere de controle ilegal levanta
 //!   `IllegalCharacterError`; `utils/datetime.py::to_excel` para o número
 //!   serial da data.
+//! - `pandas/io/formats/excel.py::ExcelFormatter.header_style`: cabeçalho em
+//!   negrito, borda fina nos quatro lados, centralizado na horizontal e
+//!   alinhado ao topo.
 //! - Aba única chamada `Sheet1` (padrão do `to_excel`).
 
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Timelike};
-use rust_xlsxwriter::{Format, Formula, Workbook, Worksheet};
+use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Formula, Workbook, Worksheet};
 
+use super::header::Label;
 use super::infer::{Column, ObjValue};
 use super::{ConvertError, Value};
 
@@ -27,23 +31,58 @@ const SHEET_NAME: &str = "Sheet1";
 const DATETIME_FORMAT: &str = "YYYY-MM-DD HH:MM:SS";
 const MAX_STRING_LEN: usize = 32_767;
 
-pub(crate) fn write_xlsx(columns: &[Column], data_rows: u32) -> Result<Vec<u8>, ConvertError> {
+pub(crate) fn write_xlsx(
+    labels: &[Label],
+    columns: &[Column],
+    data_rows: u32,
+) -> Result<Vec<u8>, ConvertError> {
     let mut workbook = Workbook::new();
     let datetime_fmt = Format::new().set_num_format(DATETIME_FORMAT);
+    let header_fmt = Format::new()
+        .set_bold()
+        .set_border(FormatBorder::Thin)
+        .set_align(FormatAlign::Center)
+        .set_align(FormatAlign::Top);
+    let header_datetime_fmt = header_fmt.clone().set_num_format(DATETIME_FORMAT);
     let sheet = workbook.add_worksheet();
     sheet
         .set_name(SHEET_NAME)
         .map_err(|_| ConvertError::Write)?;
 
+    for (c, label) in labels.iter().enumerate() {
+        let col = u16::try_from(c).map_err(|_| ConvertError::TooLarge("colunas"))?;
+        let cell = label_cell(label);
+        let fmt = if matches!(cell, OutCell::DateTime(_)) {
+            &header_datetime_fmt
+        } else {
+            &header_fmt
+        };
+        write_cell(sheet, 0, col, cell, fmt, Some(fmt))?;
+    }
+
     for (c, column) in columns.iter().enumerate() {
         let col = u16::try_from(c).map_err(|_| ConvertError::TooLarge("colunas"))?;
         for r in 0..data_rows {
             let cell = cell_at(column, r as usize);
-            write_cell(sheet, r, col, cell, &datetime_fmt)?;
+            write_cell(sheet, r + 1, col, cell, &datetime_fmt, None)?;
         }
     }
 
     workbook.save_to_buffer().map_err(|_| ConvertError::Write)
+}
+
+/// Rótulo de coluna gravado no cabeçalho (`_value_with_fmt` sem
+/// `_format_value`: float não finito vira célula vazia pelo `safe_string`).
+pub(crate) fn label_cell(label: &Label) -> OutCell {
+    match label {
+        Label::Str(s) => object_cell(&Value::Str(s.clone())),
+        Label::Int(i) => OutCell::Number(*i as f64),
+        Label::Float(f) if f.is_finite() => OutCell::Number(*f),
+        Label::Float(_) => OutCell::Blank,
+        Label::Bool(b) => OutCell::Bool(*b),
+        Label::DateTime(dt) => OutCell::DateTime(openpyxl_to_excel(dt)),
+        Label::Time(t) => OutCell::Text(python_time_str(t)),
+    }
 }
 
 /// Célula de saída já no tipo que o openpyxl gravaria.
@@ -109,21 +148,35 @@ fn write_cell(
     col: u16,
     cell: OutCell,
     datetime_fmt: &Format,
+    style: Option<&Format>,
 ) -> Result<(), ConvertError> {
-    let result = match cell {
-        OutCell::Blank => return Ok(()),
-        OutCell::Number(n) => sheet.write_number(row, col, openpyxl_number(n)).map(|_| ()),
-        OutCell::Bool(b) => sheet.write_boolean(row, col, b).map(|_| ()),
-        OutCell::DateTime(serial) => sheet
+    let result = match (cell, style) {
+        (OutCell::Blank, None) => return Ok(()),
+        (OutCell::Blank, Some(f)) => sheet.write_blank(row, col, f).map(|_| ()),
+        (OutCell::Number(n), None) => sheet.write_number(row, col, openpyxl_number(n)).map(|_| ()),
+        (OutCell::Number(n), Some(f)) => sheet
+            .write_number_with_format(row, col, openpyxl_number(n), f)
+            .map(|_| ()),
+        (OutCell::Bool(b), None) => sheet.write_boolean(row, col, b).map(|_| ()),
+        (OutCell::Bool(b), Some(f)) => sheet.write_boolean_with_format(row, col, b, f).map(|_| ()),
+        (OutCell::DateTime(serial), _) => sheet
             .write_number_with_format(row, col, openpyxl_number(serial), datetime_fmt)
             .map(|_| ()),
-        OutCell::Text(s) => {
+        (OutCell::Text(s), style) => {
             check_string(&s, row, col)?;
-            sheet.write_string(row, col, s).map(|_| ())
+            match style {
+                None => sheet.write_string(row, col, s).map(|_| ()),
+                Some(f) => sheet.write_string_with_format(row, col, s, f).map(|_| ()),
+            }
         }
-        OutCell::Formula(s) => {
+        (OutCell::Formula(s), style) => {
             check_string(&s, row, col)?;
-            sheet.write_formula(row, col, Formula::new(s)).map(|_| ())
+            match style {
+                None => sheet.write_formula(row, col, Formula::new(s)).map(|_| ()),
+                Some(f) => sheet
+                    .write_formula_with_format(row, col, Formula::new(s), f)
+                    .map(|_| ()),
+            }
         }
     };
     result.map_err(|_| ConvertError::Write)
@@ -145,10 +198,10 @@ fn check_string(s: &str, row: u32, col: u16) -> Result<(), ConvertError> {
         c <= 0x08 || (0x0B..=0x0C).contains(&c) || (0x0E..=0x1F).contains(&c)
     });
     if illegal {
-        return Err(ConvertError::IllegalCharacter { row: row + 2, col });
+        return Err(ConvertError::IllegalCharacter { row: row + 1, col });
     }
     if s.chars().count() > MAX_STRING_LEN {
-        return Err(ConvertError::StringTooLong { row: row + 2, col });
+        return Err(ConvertError::StringTooLong { row: row + 1, col });
     }
     Ok(())
 }
@@ -268,7 +321,7 @@ mod tests {
     #[test]
     fn caractere_de_controle_e_recusado() {
         assert!(matches!(
-            check_string("a\u{0001}b", 0, 0),
+            check_string("a\u{0001}b", 1, 0),
             Err(ConvertError::IllegalCharacter { row: 2, col: 0 })
         ));
         assert!(check_string("tab\tok\nquebra", 0, 0).is_ok());

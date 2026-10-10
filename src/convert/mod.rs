@@ -4,17 +4,19 @@
 //!
 //! ```python
 //! df = pd.read_excel(r'<tmp>.xls')
-//! df.to_excel(r'<tmp>.xlsx', index=False, header=False)
+//! df.to_excel(r'<tmp>.xlsx', index=False)
 //! ```
 //!
 //! com pandas 2.2.3, xlrd 2.0.1 e openpyxl 3.1.5 (versões instaladas no
 //! ambiente de referência). Os sistemas consomem o resultado, então o
 //! contrato é o comportamento observável dessa linha, inclusive as
-//! peculiaridades: só a primeira aba, a primeira linha descartada (vira
-//! cabeçalho e não é gravada), textos numéricos convertidos em número e
-//! horas gravadas como texto. Cada etapa cita a fonte do pandas que
-//! reproduz; ver `read.rs`, `infer.rs` e `write.rs`.
+//! peculiaridades: só a primeira aba, a primeira linha virando nomes de
+//! coluna (`Unnamed: N` para vazio, sufixo `.N` para repetido), textos
+//! numéricos convertidos em número e horas gravadas como texto. Cada etapa
+//! cita a fonte do pandas que reproduz; ver `read.rs`, `header.rs`,
+//! `infer.rs` e `write.rs`.
 
+mod header;
 mod infer;
 mod read;
 mod write;
@@ -92,6 +94,11 @@ pub fn convert(input: &[u8], limits: Limits) -> Result<Vec<u8>, ConvertError> {
     }
     let format = read::detect(input).ok_or(ConvertError::UnsupportedFormat)?;
     let grid = read::read_first_sheet(input, format, limits)?;
+    let labels = grid
+        .rows
+        .first()
+        .map(|row| header::column_labels(row))
+        .unwrap_or_default();
     let columns = infer::infer_columns(&grid);
-    write::write_xlsx(&columns, grid.data_rows())
+    write::write_xlsx(&labels, &columns, grid.data_rows())
 }

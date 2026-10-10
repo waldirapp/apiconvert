@@ -12,7 +12,7 @@ o resumo agregado sai na saída padrão.
 Gera a referência executando exatamente o que o conversor de referência executa:
 
     df = pd.read_excel(entrada)
-    df.to_excel(ref, index=False, header=False)
+    df.to_excel(ref, index=False)
 
 e compara as duas saídas célula a célula com o openpyxl. Imprime um JSON
 por arquivo. Sem ``--valores`` o relatório traz só posições e tipos das
@@ -81,7 +81,7 @@ def comparar(entrada, rust_xlsx, mostrar_valores):
         ref = os.path.join(tmp, "ref.xlsx")
         try:
             df = pd.read_excel(entrada)
-            df.to_excel(ref, index=False, header=False)
+            df.to_excel(ref, index=False)
         except Exception as exc:  # o pandas recusou: o Rust também deve recusar
             rel["pandas"] = "erro"
             rel["pandas_erro"] = type(exc).__name__
