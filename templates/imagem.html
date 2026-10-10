@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block conteudo %}
+<h1>Converter imagem em WebP</h1>
+<form class="envio" hx-post="/ui/imagem" hx-encoding="multipart/form-data" enctype="multipart/form-data"
+      hx-target="#resultado" hx-swap="innerHTML" hx-indicator="#carregando">
+  <label class="arquivo">
+    <span>Imagem</span>
+    <input type="file" name="arquivo" accept="image/*" required data-previa="previa-original">
+  </label>
+  <label class="numero">
+    <span>Lado maior (px)</span>
+    <input type="number" name="max" value="400" min="0" max="{{ max_lado }}">
+  </label>
+  <label class="numero">
+    <span>Qualidade</span>
+    <input type="number" name="q" value="50" min="0" max="100">
+  </label>
+  <button type="submit">Converter</button>
+  <span id="carregando" class="htmx-indicator">Convertendo…</span>
+</form>
+<p class="dica">O padrão (lado maior 400 px, qualidade 50) é o mesmo do x-duall. Lado maior 0 mantém o tamanho original.</p>
+<div class="comparacao">
+  <figure>
+    <figcaption>Original</figcaption>
+    <img id="previa-original" alt="" hidden>
+  </figure>
+  <section id="resultado" aria-live="polite"></section>
+</div>
+{% endblock %}

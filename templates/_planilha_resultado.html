@@ -1,0 +1,21 @@
+<div class="ok">
+  <h2>{{ nome }}</h2>
+  <dl class="numeros">
+    <div><dt>Linhas</dt><dd>{{ linhas }}</dd></div>
+    <div><dt>Colunas</dt><dd>{{ colunas }}</dd></div>
+    <div><dt>Enviado</dt><dd>{{ bytes_entrada }}</dd></div>
+    <div><dt>Gerado</dt><dd>{{ bytes_saida }}</dd></div>
+    <div><dt>Tempo</dt><dd>{{ tempo_ms }} ms</dd></div>
+  </dl>
+  <p><a class="botao" href="/ui/baixar/{{ id }}" download>Baixar {{ nome }}</a></p>
+  {% if !celulas.is_empty() %}
+  <h3>Prévia{% if cortada %} (primeiras {{ celulas.len() }} linhas e {{ colunas_previa }} colunas){% endif %}</h3>
+  <div class="tabela">
+    <table>
+      {% for linha in celulas %}
+      <tr>{% for c in linha %}<td>{{ c }}</td>{% endfor %}</tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% endif %}
+</div>

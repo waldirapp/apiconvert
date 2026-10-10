@@ -7,6 +7,7 @@
 //! - `compat`: modo `apiconvert`, com o contrato HTTP do conversor legado.
 //! - `webp` e `imagem`: conversão de imagem em WebP (`POST /webp`, com token),
 //!   nos dois modos.
+//! - `ui`: telas web (askama + htmx) para testar as duas conversões.
 //!
 //! `router` escolhe as rotas pelo modo da configuração.
 
@@ -35,9 +36,18 @@ pub(crate) fn imagem_router(
     ))
 }
 
+/// Telas web, quando ligadas, com o semáforo das conversões.
+pub(crate) fn ui_router(
+    cfg: &config::Config,
+    permits: std::sync::Arc<tokio::sync::Semaphore>,
+) -> Option<Router> {
+    cfg.ui.then(|| ui::router(cfg, permits))
+}
+
 pub mod app;
 pub mod compat;
 pub mod config;
 pub mod convert;
 pub mod imagem;
+pub mod ui;
 pub mod webp;

@@ -52,6 +52,10 @@ pub struct Config {
     pub webp_token: Option<String>,
     /// Teto de largura × altura da imagem decodificada em `/webp`.
     pub webp_max_pixels: u64,
+    /// Telas web (`/`, `/planilha`, `/imagem`); ver `ui.rs`.
+    pub ui: bool,
+    /// Conversões por minuto, por IP, nas telas.
+    pub ui_rate_per_min: u32,
 }
 
 impl std::fmt::Debug for Config {
@@ -68,6 +72,8 @@ impl std::fmt::Debug for Config {
             .field("compat", &self.compat)
             .field("webp_token", &self.webp_token.as_ref().map(|_| "<oculto>"))
             .field("webp_max_pixels", &self.webp_max_pixels)
+            .field("ui", &self.ui)
+            .field("ui_rate_per_min", &self.ui_rate_per_min)
             .finish()
     }
 }
@@ -126,6 +132,18 @@ impl Config {
         let store_mb: usize = parse_or(&get, "XLSCONVERT_COMPAT_MAX_STORE_MB", "256")?;
         let max_entries: usize = parse_or(&get, "XLSCONVERT_COMPAT_MAX_ENTRIES", "2000")?;
         let webp_max_pixels: u64 = parse_or(&get, "XLSCONVERT_WEBP_MAX_PIXELS", "25000000")?;
+        // Telas: ligadas por padrão no modo apiconvert (já exposto), desligadas
+        // no interno (só para o serviço chamador).
+        let ui_padrao = if mode == Mode::Apiconvert { "1" } else { "0" };
+        let ui = match get("XLSCONVERT_UI")
+            .unwrap_or_else(|| ui_padrao.to_string())
+            .trim()
+        {
+            "1" | "true" | "sim" => true,
+            "0" | "false" | "nao" | "não" => false,
+            _ => return Err(ConfigError::Invalid("XLSCONVERT_UI")),
+        };
+        let ui_rate_per_min: u32 = parse_or(&get, "XLSCONVERT_UI_RATE_PER_MIN", "30")?;
         if max_body_mb == 0
             || max_concurrent == 0
             || timeout_secs == 0
@@ -134,6 +152,7 @@ impl Config {
             || store_mb == 0
             || max_entries == 0
             || webp_max_pixels == 0
+            || ui_rate_per_min == 0
         {
             return Err(ConfigError::Invalid(
                 "limites (precisam ser maiores que zero)",
@@ -157,6 +176,8 @@ impl Config {
             },
             webp_token,
             webp_max_pixels,
+            ui,
+            ui_rate_per_min,
         })
     }
 }

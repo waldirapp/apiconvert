@@ -1,0 +1,17 @@
+<figure>
+  <figcaption>WebP gerado</figcaption>
+  <img src="data:image/webp;base64,{{ base64 }}" alt="WebP gerado de {{ nome }}">
+</figure>
+<dl class="numeros">
+  <div><dt>Original</dt><dd>{{ largura_orig }}×{{ altura_orig }}, {{ bytes_entrada }}</dd></div>
+  <div><dt>WebP</dt><dd>{{ largura }}×{{ altura }}, {{ bytes_saida }}</dd></div>
+  <div><dt>Redução</dt><dd>{{ reducao }}</dd></div>
+  <div><dt>Transparência</dt><dd>{% if transparente %}sim (método 4){% else %}não (método 6){% endif %}</dd></div>
+  <div><dt>Tempo</dt><dd>{{ tempo_ms }} ms</dd></div>
+</dl>
+<p><a class="botao" href="/ui/baixar/{{ id }}" download>Baixar {{ nome_saida }}</a></p>
+<label class="base64">
+  <span>Base64 (o que o x-duall grava no campo da imagem), {{ base64.len() }} caracteres</span>
+  <textarea readonly rows="4">{{ base64 }}</textarea>
+</label>
+<button type="button" data-copiar>Copiar base64</button>

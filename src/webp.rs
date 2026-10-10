@@ -81,6 +81,11 @@ pub fn to_webp(input: &[u8], params: &WebpParams, max_pixels: u64) -> Result<Vec
     encode(img, rw, rh, params.quality, method_for)
 }
 
+/// Largura e altura pelo cabeçalho, sem decodificar a imagem.
+pub fn dimensions(input: &[u8]) -> Option<(u32, u32)> {
+    reader(input).ok()?.into_dimensions().ok()
+}
+
 fn reader(input: &[u8]) -> Result<ImageReader<Cursor<&[u8]>>, WebpError> {
     let r = ImageReader::new(Cursor::new(input))
         .with_guessed_format()
