@@ -71,7 +71,7 @@ async fn convert_handler(State(st): State<AppState>, headers: HeaderMap, body: B
 
     let started = Instant::now();
     let size = body.len();
-    let limits = st.cfg.limits;
+    let limits = st.cfg.limits.with_timeout(st.cfg.timeout);
     let job = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         convert::convert(&body, limits)
@@ -140,6 +140,7 @@ fn classify(e: &ConvertError) -> (StatusCode, &'static str) {
             (StatusCode::UNPROCESSABLE_ENTITY, "conteudo_invalido")
         }
         ConvertError::Write => (StatusCode::INTERNAL_SERVER_ERROR, "erro_interno"),
+        ConvertError::DeadlineExceeded => (StatusCode::GATEWAY_TIMEOUT, "tempo_esgotado"),
     }
 }
 

@@ -9,7 +9,7 @@ repository = "https://github.com/waldirapp/xlsconvert"
 publish = false
 
 [dependencies]
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 calamine = { version = "0.36", features = ["dates"] }
 cfb = "0.15"
 rust_xlsxwriter = "0.99"
@@ -23,6 +23,7 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [profile.release]
 lto = true

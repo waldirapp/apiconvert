@@ -1,7 +1,7 @@
 //! Ponto de entrada do serviço `xlsconvert`.
 
 use tracing_subscriber::EnvFilter;
-use xlsconvert::{app, config::Config};
+use xlsconvert::config::{Config, Mode};
 
 #[tokio::main]
 async fn main() {
@@ -10,6 +10,8 @@ async fn main() {
             EnvFilter::try_from_env("XLSCONVERT_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .with_target(false)
+        // Sem códigos de cor no journal do systemd: só colore em terminal.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 
     let cfg = match Config::from_env() {
@@ -19,8 +21,11 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    if !cfg.bind.ip().is_loopback() {
+    if cfg.mode == Mode::Interno && !cfg.bind.ip().is_loopback() {
         tracing::warn!(bind = %cfg.bind, "escutando fora do loopback: o serviço deve ficar atrás do serviço chamador e do firewall");
+    }
+    if cfg.mode == Mode::Apiconvert {
+        tracing::warn!(bind = %cfg.bind, "modo apiconvert: contrato legado sem autenticação; restrinja o acesso pelo firewall");
     }
 
     let listener = match tokio::net::TcpListener::bind(cfg.bind).await {
@@ -30,9 +35,9 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    tracing::info!(bind = %cfg.bind, versao = env!("CARGO_PKG_VERSION"), "xlsconvert iniciado");
+    tracing::info!(bind = %cfg.bind, modo = ?cfg.mode, versao = env!("CARGO_PKG_VERSION"), "xlsconvert iniciado");
 
-    if let Err(e) = axum::serve(listener, app::router(cfg))
+    if let Err(e) = axum::serve(listener, xlsconvert::router(cfg))
         .with_graceful_shutdown(shutdown_signal())
         .await
     {

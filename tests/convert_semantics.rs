@@ -42,7 +42,7 @@ fn as_f64(d: &Data) -> Option<f64> {
 }
 
 #[test]
-fn primeira_linha_descartada_so_primeira_aba_e_nome_sheet1() {
+fn primeira_linha_vira_cabecalho_so_primeira_aba_e_nome_sheet1() {
     let mut wb = Workbook::new();
     let s = wb.add_worksheet();
     s.set_name("Dados").unwrap();
@@ -59,9 +59,11 @@ fn primeira_linha_descartada_so_primeira_aba_e_nome_sheet1() {
     let out = convert(&input, Limits::default()).unwrap();
     let (name, grid) = read_output(&out);
     assert_eq!(name, "Sheet1");
-    assert_eq!(grid.len(), 2);
-    assert_eq!(grid[0][0], Data::String("linha 1".into()));
-    assert_eq!(grid[1][1], Data::String("y".into()));
+    assert_eq!(grid.len(), 3);
+    assert_eq!(grid[0][0], Data::String("CABECALHO".into()));
+    assert_eq!(grid[0][1], Data::String("OUTRO".into()));
+    assert_eq!(grid[1][0], Data::String("linha 1".into()));
+    assert_eq!(grid[2][1], Data::String("y".into()));
 }
 
 #[test]
@@ -77,10 +79,11 @@ fn texto_numerico_vira_numero_e_coluna_mista_mantem_texto() {
     let input = wb.save_to_buffer().unwrap();
 
     let (_, grid) = read_output(&convert(&input, Limits::default()).unwrap());
-    assert_eq!(as_f64(&grid[0][0]), Some(123.0));
-    assert_eq!(as_f64(&grid[1][0]), Some(456.0));
-    assert_eq!(grid[0][1], Data::String("00123".into()));
-    assert_eq!(grid[1][1], Data::String("ABC".into()));
+    assert_eq!(grid[0][0], Data::String("COD".into()));
+    assert_eq!(as_f64(&grid[1][0]), Some(123.0));
+    assert_eq!(as_f64(&grid[2][0]), Some(456.0));
+    assert_eq!(grid[1][1], Data::String("00123".into()));
+    assert_eq!(grid[2][1], Data::String("ABC".into()));
 }
 
 #[test]
@@ -95,10 +98,11 @@ fn nulos_viram_vazio_e_linha_em_branco_no_meio_e_mantida() {
     let input = wb.save_to_buffer().unwrap();
 
     let (_, grid) = read_output(&convert(&input, Limits::default()).unwrap());
-    assert_eq!(grid[0][0], Data::String("texto".into()));
-    assert_eq!(grid[1][0], Data::Empty);
+    assert_eq!(grid[0][0], Data::String("A".into()));
+    assert_eq!(grid[1][0], Data::String("texto".into()));
     assert_eq!(grid[2][0], Data::Empty);
-    assert_eq!(grid[3][0], Data::String("fim".into()));
+    assert_eq!(grid[3][0], Data::Empty);
+    assert_eq!(grid[4][0], Data::String("fim".into()));
 }
 
 #[test]
@@ -117,8 +121,8 @@ fn datas_com_formato_e_hora_vira_texto() {
 
     let (_, grid) = read_output(&convert(&input, Limits::default()).unwrap());
     // 2026-10-10 = serial 46305
-    assert_eq!(as_f64(&grid[0][0]), Some(46305.0));
-    assert_eq!(grid[0][1], Data::String("12:00:00".into()));
+    assert_eq!(as_f64(&grid[1][0]), Some(46305.0));
+    assert_eq!(grid[1][1], Data::String("12:00:00".into()));
 }
 
 #[test]
@@ -135,11 +139,11 @@ fn inteiros_com_vazio_ficam_float_e_booleanos_preservados() {
     let input = wb.save_to_buffer().unwrap();
 
     let (_, grid) = read_output(&convert(&input, Limits::default()).unwrap());
-    assert_eq!(as_f64(&grid[0][0]), Some(10.0));
-    assert_eq!(grid[1][0], Data::Empty);
-    assert_eq!(as_f64(&grid[2][0]), Some(30.0));
-    assert_eq!(grid[0][1], Data::Bool(true));
-    assert_eq!(grid[1][1], Data::Bool(false));
+    assert_eq!(as_f64(&grid[1][0]), Some(10.0));
+    assert_eq!(grid[2][0], Data::Empty);
+    assert_eq!(as_f64(&grid[3][0]), Some(30.0));
+    assert_eq!(grid[1][1], Data::Bool(true));
+    assert_eq!(grid[2][1], Data::Bool(false));
 }
 
 #[test]
@@ -151,11 +155,15 @@ fn colunas_vazias_a_esquerda_mantem_a_posicao() {
     let input = wb.save_to_buffer().unwrap();
 
     let (_, grid) = read_output(&convert(&input, Limits::default()).unwrap());
-    assert_eq!(grid[0][2], Data::String("valor".into()));
+    // colunas vazias no cabeçalho viram "Unnamed: N", como no pandas
+    assert_eq!(grid[0][0], Data::String("Unnamed: 0".into()));
+    assert_eq!(grid[0][1], Data::String("Unnamed: 1".into()));
+    assert_eq!(grid[0][2], Data::String("C".into()));
+    assert_eq!(grid[1][2], Data::String("valor".into()));
 }
 
 #[test]
-fn so_cabecalho_gera_aba_vazia() {
+fn so_cabecalho_grava_so_o_cabecalho() {
     let mut wb = Workbook::new();
     wb.add_worksheet()
         .write_string(0, 0, "SO CABECALHO")
@@ -163,7 +171,53 @@ fn so_cabecalho_gera_aba_vazia() {
     let input = wb.save_to_buffer().unwrap();
     let (name, grid) = read_output(&convert(&input, Limits::default()).unwrap());
     assert_eq!(name, "Sheet1");
-    assert!(grid.is_empty());
+    assert_eq!(grid, vec![vec![Data::String("SO CABECALHO".into())]]);
+}
+
+#[test]
+fn cabecalho_repetido_e_em_negrito_com_borda() {
+    let mut wb = Workbook::new();
+    let s = wb.add_worksheet();
+    s.write_string(0, 0, "X").unwrap();
+    s.write_string(0, 1, "X").unwrap();
+    s.write_number(0, 2, 2024.0).unwrap();
+    s.write_string(1, 0, "a").unwrap();
+    let input = wb.save_to_buffer().unwrap();
+    let out = convert(&input, Limits::default()).unwrap();
+    let (_, grid) = read_output(&out);
+    assert_eq!(grid[0][0], Data::String("X".into()));
+    assert_eq!(grid[0][1], Data::String("X.1".into()));
+    assert_eq!(as_f64(&grid[0][2]), Some(2024.0));
+
+    // Estilo do cabeçalho do pandas: o XML de estilos tem negrito e borda fina.
+    let styles = zip_entry(&out, "xl/styles.xml");
+    assert!(styles.contains("<b/>"), "negrito");
+    assert!(styles.contains(r#"style="thin""#), "borda fina");
+    assert!(styles.contains(r#"horizontal="center""#), "centralizado");
+}
+
+/// Conteúdo de uma entrada do `.xlsx` (que é um ZIP), para conferir estilos.
+fn zip_entry(xlsx: &[u8], name: &str) -> String {
+    use std::io::Read;
+    let mut archive = zip::ZipArchive::new(Cursor::new(xlsx.to_vec())).expect("zip");
+    let mut f = archive.by_name(name).expect("entrada");
+    let mut s = String::new();
+    f.read_to_string(&mut s).expect("utf-8");
+    s
+}
+
+#[test]
+fn prazo_vencido_interrompe_a_conversao() {
+    let mut wb = Workbook::new();
+    let s = wb.add_worksheet();
+    s.write_string(0, 0, "A").unwrap();
+    s.write_string(1, 0, "b").unwrap();
+    let input = wb.save_to_buffer().unwrap();
+    let limits = Limits::default().with_timeout(std::time::Duration::ZERO);
+    assert!(matches!(
+        convert(&input, limits),
+        Err(ConvertError::DeadlineExceeded)
+    ));
 }
 
 #[test]

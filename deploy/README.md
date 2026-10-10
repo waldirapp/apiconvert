@@ -1,0 +1,60 @@
+# Implantação no lugar do conversor legado (modo `apiconvert`)
+
+O modo `apiconvert` reproduz o contrato HTTP do conversor legado (multipart em `POST /convert`, download em `GET /convert?file=`), então os clientes não mudam. A diferença é interna: sem Python, sem gravar arquivo em disco, sem acumular temporários, sem root e sem transformar o nome enviado pelo cliente em caminho de arquivo.
+
+## Pré-requisito
+
+O binário `x86_64-unknown-linux-musl` (estático, roda em qualquer Linux x86-64):
+
+```bash
+cargo build --release --locked --target x86_64-unknown-linux-musl
+```
+
+## Instalação, como root
+
+```bash
+useradd -r -s /usr/sbin/nologin -d /nonexistent xlsconvert
+install -d -m 755 /opt/xlsconvert
+install -m 755 target/x86_64-unknown-linux-musl/release/xlsconvert /opt/xlsconvert/xlsconvert
+install -m 644 deploy/xlsconvert-apiconvert.service /etc/systemd/system/xlsconvert-apiconvert.service
+systemctl daemon-reload
+```
+
+## Ensaio antes da troca
+
+Sobe o serviço numa porta paralela, sem tocar no legado, e confirma que a unit funciona com o endurecimento do systemd no servidor:
+
+```bash
+systemd-run --unit=xlsconvert-ensaio --property=User=xlsconvert --property=ProtectSystem=strict \
+  --setenv=XLSCONVERT_MODE=apiconvert --setenv=XLSCONVERT_BIND=127.0.0.1:9198 /opt/xlsconvert/xlsconvert
+curl -sS -F "x=@planilha.xls;filename=ensaio.xls" http://127.0.0.1:9198/convert
+systemctl stop xlsconvert-ensaio
+```
+
+## Troca
+
+`deploy/trocar.sh` faz a troca com verificação ponta a ponta e volta ao legado sozinho se algo falhar (binário novo em `/opt/xlsconvert/xlsconvert.new`):
+
+```bash
+bash deploy/trocar.sh planilha_de_teste.xls
+```
+
+Passo a passo manual equivalente:
+
+```bash
+systemctl stop <servico-legado> && systemctl disable <servico-legado>
+systemctl enable --now xlsconvert-apiconvert
+systemctl status xlsconvert-apiconvert --no-pager
+```
+
+## Rollback
+
+```bash
+systemctl disable --now xlsconvert-apiconvert
+systemctl enable --now <servico-legado>
+```
+
+## Operação
+
+- Logs: `journalctl -u xlsconvert-apiconvert -f` (tamanho, duração e resultado de cada conversão; nunca o conteúdo nem o nome do arquivo).
+- Os resultados ficam disponíveis para `GET` por 1 hora (`XLSCONVERT_COMPAT_TTL_SECS`), com teto de 256 MB (`XLSCONVERT_COMPAT_MAX_STORE_MB`) e 2.000 arquivos (`XLSCONVERT_COMPAT_MAX_ENTRIES`). Reiniciar o serviço descarta os resultados ainda não baixados.

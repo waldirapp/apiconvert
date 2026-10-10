@@ -1,5 +1,13 @@
-//! Configuração por variáveis de ambiente. Falha fechada: sem token interno
-//! válido o serviço não sobe.
+//! Configuração por variáveis de ambiente.
+//!
+//! Dois modos (`XLSCONVERT_MODE`):
+//! - `interno` (padrão): `POST /convert` com os bytes da planilha e resposta
+//!   com o `.xlsx`, protegido por token interno obrigatório (falha fechada:
+//!   sem token válido o serviço não sobe).
+//! - `apiconvert`: contrato HTTP idêntico ao do conversor legado
+//!   (multipart + download por nome), para substituí-lo sem mudar os
+//!   clientes. Os clientes legados não enviam credencial, então esse modo não
+//!   tem token; ver `compat.rs`.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -9,26 +17,47 @@ use crate::convert::Limits;
 /// Tamanho mínimo do token interno.
 pub const MIN_TOKEN_LEN: usize = 32;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Interno,
+    Apiconvert,
+}
+
+/// Parâmetros do armazenamento temporário do modo `apiconvert`.
+#[derive(Debug, Clone, Copy)]
+pub struct CompatStore {
+    /// Tempo que um `.xlsx` convertido fica disponível para `GET`.
+    pub ttl: Duration,
+    /// Teto de bytes somados de todos os arquivos guardados.
+    pub max_bytes: usize,
+    /// Teto de arquivos guardados ao mesmo tempo.
+    pub max_entries: usize,
+}
+
 #[derive(Clone)]
 pub struct Config {
+    pub mode: Mode,
     pub bind: SocketAddr,
     pub token: String,
     pub max_body_bytes: usize,
     pub max_concurrent: usize,
     pub timeout: Duration,
     pub limits: Limits,
+    pub compat: CompatStore,
 }
 
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // O token nunca aparece em log.
         f.debug_struct("Config")
+            .field("mode", &self.mode)
             .field("bind", &self.bind)
             .field("token", &"<oculto>")
             .field("max_body_bytes", &self.max_body_bytes)
             .field("max_concurrent", &self.max_concurrent)
             .field("timeout", &self.timeout)
             .field("limits", &self.limits)
+            .field("compat", &self.compat)
             .finish()
     }
 }
@@ -47,21 +76,48 @@ impl Config {
     }
 
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        let mode = match get("XLSCONVERT_MODE")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "" | "interno" => Mode::Interno,
+            "apiconvert" => Mode::Apiconvert,
+            _ => return Err(ConfigError::Invalid("XLSCONVERT_MODE")),
+        };
+
         let token = get("XLSCONVERT_TOKEN").unwrap_or_default();
-        if token.trim().len() < MIN_TOKEN_LEN || token.trim() != token {
+        if mode == Mode::Interno && (token.trim().len() < MIN_TOKEN_LEN || token.trim() != token) {
             return Err(ConfigError::Token);
         }
-        let bind = parse_or(&get, "XLSCONVERT_BIND", "127.0.0.1:9320")?;
+
+        let default_bind = match mode {
+            Mode::Interno => "127.0.0.1:9320",
+            Mode::Apiconvert => "0.0.0.0:9098",
+        };
+        let bind = parse_or(&get, "XLSCONVERT_BIND", default_bind)?;
         let max_body_mb: usize = parse_or(&get, "XLSCONVERT_MAX_BODY_MB", "20")?;
         let max_concurrent: usize = parse_or(&get, "XLSCONVERT_MAX_CONCURRENT", "2")?;
         let timeout_secs: u64 = parse_or(&get, "XLSCONVERT_TIMEOUT_SECS", "60")?;
         let max_cells: u64 = parse_or(&get, "XLSCONVERT_MAX_CELLS", "5000000")?;
-        if max_body_mb == 0 || max_concurrent == 0 || timeout_secs == 0 || max_cells == 0 {
+        let ttl_secs: u64 = parse_or(&get, "XLSCONVERT_COMPAT_TTL_SECS", "3600")?;
+        let store_mb: usize = parse_or(&get, "XLSCONVERT_COMPAT_MAX_STORE_MB", "256")?;
+        let max_entries: usize = parse_or(&get, "XLSCONVERT_COMPAT_MAX_ENTRIES", "2000")?;
+        if max_body_mb == 0
+            || max_concurrent == 0
+            || timeout_secs == 0
+            || max_cells == 0
+            || ttl_secs == 0
+            || store_mb == 0
+            || max_entries == 0
+        {
             return Err(ConfigError::Invalid(
                 "limites (precisam ser maiores que zero)",
             ));
         }
         Ok(Self {
+            mode,
             bind,
             token,
             max_body_bytes: max_body_mb * 1024 * 1024,
@@ -70,6 +126,11 @@ impl Config {
             limits: Limits {
                 max_cells,
                 ..Limits::default()
+            },
+            compat: CompatStore {
+                ttl: Duration::from_secs(ttl_secs),
+                max_bytes: store_mb * 1024 * 1024,
+                max_entries,
             },
         })
     }
@@ -115,6 +176,7 @@ mod tests {
     fn padroes_seguros() {
         let tok = "x".repeat(MIN_TOKEN_LEN);
         let cfg = Config::from_lookup(lookup(&[("XLSCONVERT_TOKEN", &tok)])).unwrap();
+        assert_eq!(cfg.mode, Mode::Interno);
         assert!(cfg.bind.ip().is_loopback());
         assert_eq!(cfg.bind.port(), 9320);
         assert_eq!(cfg.max_body_bytes, 20 * 1024 * 1024);
@@ -129,5 +191,21 @@ mod tests {
             ("XLSCONVERT_MAX_CONCURRENT", "0")
         ]))
         .is_err());
+    }
+
+    #[test]
+    fn modo_apiconvert_sem_token_e_porta_legada() {
+        let cfg = Config::from_lookup(lookup(&[("XLSCONVERT_MODE", "apiconvert")])).unwrap();
+        assert_eq!(cfg.mode, Mode::Apiconvert);
+        assert_eq!(cfg.bind.port(), 9098);
+        assert_eq!(cfg.compat.ttl, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn modo_desconhecido_recusado() {
+        assert!(matches!(
+            Config::from_lookup(lookup(&[("XLSCONVERT_MODE", "outro")])),
+            Err(ConfigError::Invalid("XLSCONVERT_MODE"))
+        ));
     }
 }

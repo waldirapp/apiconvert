@@ -41,40 +41,49 @@ fn num(d: &Data) -> f64 {
 fn xls_biff_com_tipos_variados() {
     let (name, g) = output_grid();
     assert_eq!(name, "Sheet1");
-    assert_eq!(g.len(), 2, "cabeçalho descartado, 2 linhas de dados");
+    assert_eq!(g.len(), 3, "cabeçalho + 2 linhas de dados");
+
+    // Cabeçalho: nomes das colunas na 1ª linha.
+    let cab: Vec<Data> = [
+        "CODIGO", "DATA", "HORA", "VALOR", "INTEIRO", "BOOL", "TEXTO",
+    ]
+    .iter()
+    .map(|s| Data::String((*s).into()))
+    .collect();
+    assert_eq!(g[0], cab);
 
     // CODIGO: texto numérico vira número (perde o zero à esquerda).
-    assert_eq!(num(&g[0][0]), 123.0);
-    assert_eq!(num(&g[1][0]), 456.0);
+    assert_eq!(num(&g[1][0]), 123.0);
+    assert_eq!(num(&g[2][0]), 456.0);
 
     // DATA: serial com formato de data-hora.
-    assert_eq!(num(&g[0][1]), 46305.0); // 2026-10-10
-    assert_eq!(num(&g[1][1]), 45351.0); // 2024-02-29
+    assert_eq!(num(&g[1][1]), 46305.0); // 2026-10-10
+    assert_eq!(num(&g[2][1]), 45351.0); // 2024-02-29
     assert!(
-        matches!(g[0][1], Data::DateTime(_)),
+        matches!(g[1][1], Data::DateTime(_)),
         "célula de data com formato de data"
     );
 
     // HORA: vira texto.
-    assert_eq!(g[0][2], Data::String("14:30:00".into()));
-    assert_eq!(g[1][2], Data::String("08:05:09".into()));
+    assert_eq!(g[1][2], Data::String("14:30:00".into()));
+    assert_eq!(g[2][2], Data::String("08:05:09".into()));
 
     // VALOR: float com vazio.
-    assert_eq!(num(&g[0][3]), 10.5);
-    assert_eq!(g[1][3], Data::Empty);
+    assert_eq!(num(&g[1][3]), 10.5);
+    assert_eq!(g[2][3], Data::Empty);
 
     // INTEIRO
-    assert_eq!(num(&g[0][4]), 1.0);
-    assert_eq!(num(&g[1][4]), 2.0);
+    assert_eq!(num(&g[1][4]), 1.0);
+    assert_eq!(num(&g[2][4]), 2.0);
 
     // BOOL: o LibreOffice grava booleano no .xls como número com formato
     // VERDADEIRO/FALSO (o calamine lê Int(1)/Int(0)); o xlrd também lê número,
     // então o pandas grava 1 e 0. O caminho booleano real está coberto pelos
     // testes com .xlsx em convert_semantics.rs.
-    assert_eq!(num(&g[0][5]), 1.0);
-    assert_eq!(num(&g[1][5]), 0.0);
+    assert_eq!(num(&g[1][5]), 1.0);
+    assert_eq!(num(&g[2][5]), 0.0);
 
     // TEXTO: acento preservado; "NA" vira vazio.
-    assert_eq!(g[0][6], Data::String("ação".into()));
-    assert_eq!(g[1][6], Data::Empty);
+    assert_eq!(g[1][6], Data::String("ação".into()));
+    assert_eq!(g[2][6], Data::Empty);
 }

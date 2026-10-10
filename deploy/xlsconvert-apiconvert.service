@@ -1,0 +1,42 @@
+# xlsconvert em modo apiconvert: substitui o conversor legado na porta 9098,
+# com o mesmo contrato HTTP (ver src/compat.rs). Instalação em deploy/README.md.
+#
+# O contrato legado não tem autenticação; restrinja o acesso pelo firewall
+# quando os clientes permitirem.
+
+[Unit]
+Description=xlsconvert - conversão xls/xlsx (modo apiconvert, porta 9098)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/xlsconvert/xlsconvert
+Environment=XLSCONVERT_MODE=apiconvert
+Environment=XLSCONVERT_BIND=0.0.0.0:9098
+Environment=XLSCONVERT_LOG=info
+# Ajustes opcionais (limites, TTL do resultado) em /etc/xlsconvert/xlsconvert.env.
+EnvironmentFile=-/etc/xlsconvert/xlsconvert.env
+User=xlsconvert
+Group=xlsconvert
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+# Resultados ficam em memória até expirar; teto de memória do processo.
+MemoryMax=1G
+
+# O serviço não grava em disco: logs no journal, conversão em memória.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
