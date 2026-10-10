@@ -56,11 +56,12 @@ systemctl enable --now <servico-legado>
 
 ## Rota de imagem (`/webp`)
 
-A rota só existe com `XLSCONVERT_WEBP_TOKEN` definido. O token fica num arquivo legível só pelo root, carregado pela unit:
+A rota só existe com `XLSCONVERT_WEBP_TOKEN` definido. O token fica num arquivo legível só pelo root, carregado pela unit. O comando abaixo troca só essa linha e preserva as outras variáveis do arquivo:
 
 ```bash
 install -d -m 755 /etc/xlsconvert
-(umask 077; printf 'XLSCONVERT_WEBP_TOKEN=%s\n' "$(openssl rand -hex 32)" > /etc/xlsconvert/xlsconvert.env)
+f=/etc/xlsconvert/xlsconvert.env
+(umask 077; touch "$f"; sed -i '/^XLSCONVERT_WEBP_TOKEN=/d' "$f"; printf 'XLSCONVERT_WEBP_TOKEN=%s\n' "$(openssl rand -hex 32)" >> "$f")
 systemctl restart xlsconvert-apiconvert
 journalctl -u xlsconvert-apiconvert -n 5 --no-pager   # "rota /webp ativa"
 ```

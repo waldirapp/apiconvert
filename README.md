@@ -96,7 +96,7 @@ O serviço foi feito para ficar atrás de outro serviço na mesma máquina, que 
 | `XLSCONVERT_TOKEN` | — (obrigatória, mínimo 32 caracteres) | Token interno compartilhado com o serviço chamador. Sem ela o serviço não sobe |
 | `XLSCONVERT_BIND` | `127.0.0.1:9320` | Endereço de escuta. Fora do loopback, o serviço avisa no log |
 | `XLSCONVERT_MAX_BODY_MB` | `20` | Tamanho máximo do upload |
-| `XLSCONVERT_MAX_CONCURRENT` | `2` | Conversões simultâneas |
+| `XLSCONVERT_MAX_CONCURRENT` | `2` | Conversões simultâneas, somando planilha e imagem |
 | `XLSCONVERT_TIMEOUT_SECS` | `60` | Tempo máximo de resposta de uma conversão |
 | `XLSCONVERT_MAX_CELLS` | `5000000` | Teto de células da primeira aba |
 | `XLSCONVERT_LOG` | `info` | Filtro de log (`tracing`) |

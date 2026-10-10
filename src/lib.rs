@@ -20,13 +20,16 @@ pub fn router(cfg: config::Config) -> Router {
     }
 }
 
-/// Rota `/webp`, quando há token para ela.
-pub(crate) fn imagem_router(cfg: &config::Config) -> Option<Router> {
+/// Rota `/webp`, quando há token para ela, com o semáforo das planilhas.
+pub(crate) fn imagem_router(
+    cfg: &config::Config,
+    permits: std::sync::Arc<tokio::sync::Semaphore>,
+) -> Option<Router> {
     let token = cfg.webp_token.as_deref()?;
     Some(imagem::router(
         token,
         cfg.max_body_bytes,
-        cfg.max_concurrent,
+        permits,
         cfg.timeout,
         cfg.webp_max_pixels,
     ))

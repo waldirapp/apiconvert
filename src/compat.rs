@@ -173,9 +173,10 @@ struct CompatState {
 
 pub fn router(cfg: Config) -> Router {
     let max_body = cfg.max_body_bytes;
-    let imagem = crate::imagem_router(&cfg);
+    let permits = Arc::new(Semaphore::new(cfg.max_concurrent));
+    let imagem = crate::imagem_router(&cfg, permits.clone());
     let state = CompatState {
-        permits: Arc::new(Semaphore::new(cfg.max_concurrent)),
+        permits,
         store: Arc::new(Store::new(cfg.compat)),
         cfg: Arc::new(cfg),
     };

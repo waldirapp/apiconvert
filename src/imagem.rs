@@ -34,16 +34,18 @@ struct ImagemState {
 }
 
 /// Rotas de imagem; `token` é o que o header `X-Internal-Token` precisa trazer.
+/// `permits` é o semáforo das conversões de planilha: imagem e planilha
+/// dividem o mesmo teto de conversões simultâneas (e de memória).
 pub fn router(
     token: &str,
     max_body: usize,
-    max_concurrent: usize,
+    permits: Arc<Semaphore>,
     timeout: Duration,
     max_pixels: u64,
 ) -> Router {
     let state = ImagemState {
         token: Arc::from(token),
-        permits: Arc::new(Semaphore::new(max_concurrent)),
+        permits,
         timeout,
         max_pixels,
     };

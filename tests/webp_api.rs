@@ -256,3 +256,23 @@ async fn rota_de_planilha_continua_igual_com_a_rota_webp() {
     let (st, _, _) = send(&app, Request::get("/webp").body(Body::empty()).unwrap()).await;
     assert_eq!(st, StatusCode::METHOD_NOT_ALLOWED);
 }
+
+#[tokio::test]
+async fn webp_divide_o_semaforo_das_planilhas() {
+    // Com a única vaga ocupada (por uma conversão de planilha), /webp responde 503.
+    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let app = xlsconvert::imagem::router(
+        TOKEN,
+        1 << 20,
+        permits.clone(),
+        std::time::Duration::from_secs(10),
+        1 << 30,
+    );
+    let vaga = permits.clone().try_acquire_owned().unwrap();
+    let (st, _, body) = send(&app, post("/webp", Some(TOKEN), None, &png(10, 10))).await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(String::from_utf8_lossy(&body).contains("ocupado"));
+    drop(vaga);
+    let (st, _, _) = send(&app, post("/webp", Some(TOKEN), None, &png(10, 10))).await;
+    assert_eq!(st, StatusCode::OK);
+}

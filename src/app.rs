@@ -28,9 +28,10 @@ struct AppState {
 
 pub fn router(cfg: Config) -> Router {
     let max_body = cfg.max_body_bytes;
-    let imagem = crate::imagem_router(&cfg);
+    let permits = Arc::new(Semaphore::new(cfg.max_concurrent));
+    let imagem = crate::imagem_router(&cfg, permits.clone());
     let state = AppState {
-        permits: Arc::new(Semaphore::new(cfg.max_concurrent)),
+        permits,
         cfg: Arc::new(cfg),
     };
     let router = Router::new()
