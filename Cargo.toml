@@ -2,8 +2,8 @@
 name = "xlsconvert"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
-description = "Conversão de planilha .xls/.xlsx em .xlsx com o mesmo resultado de pandas.read_excel + DataFrame.to_excel (pandas 2.2.3)"
+rust-version = "1.89"
+description = "Conversão de planilha .xls/.xlsx em .xlsx com o mesmo resultado de pandas.read_excel + DataFrame.to_excel (pandas 2.2.3) e de imagem em WebP como o cwebp"
 license = "MIT"
 repository = "https://github.com/waldirapp/xlsconvert"
 publish = false
@@ -19,6 +19,9 @@ tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+libwebp-sys = { version = "0.14", default-features = false, features = ["std"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "tiff", "webp", "ico"] }
+base64 = "0.22"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

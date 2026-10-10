@@ -5,6 +5,8 @@
 //! - `app`: rotas HTTP do modo interno (`/health`, `POST /convert`), para uso
 //!   só pelo serviço chamador na mesma máquina, com token interno obrigatório.
 //! - `compat`: modo `apiconvert`, com o contrato HTTP do conversor legado.
+//! - `webp` e `imagem`: conversão de imagem em WebP (`POST /webp`, com token),
+//!   nos dois modos.
 //!
 //! `router` escolhe as rotas pelo modo da configuração.
 
@@ -18,7 +20,24 @@ pub fn router(cfg: config::Config) -> Router {
     }
 }
 
+/// Rota `/webp`, quando há token para ela, com o semáforo das planilhas.
+pub(crate) fn imagem_router(
+    cfg: &config::Config,
+    permits: std::sync::Arc<tokio::sync::Semaphore>,
+) -> Option<Router> {
+    let token = cfg.webp_token.as_deref()?;
+    Some(imagem::router(
+        token,
+        cfg.max_body_bytes,
+        permits,
+        cfg.timeout,
+        cfg.webp_max_pixels,
+    ))
+}
+
 pub mod app;
 pub mod compat;
 pub mod config;
 pub mod convert;
+pub mod imagem;
+pub mod webp;

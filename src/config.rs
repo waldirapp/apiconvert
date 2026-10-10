@@ -8,6 +8,10 @@
 //!   (multipart + download por nome), para substituí-lo sem mudar os
 //!   clientes. Os clientes legados não enviam credencial, então esse modo não
 //!   tem token; ver `compat.rs`.
+//!
+//! A rota `POST /webp` (`imagem.rs`) exige token nos dois modos: no `interno`
+//! é o `XLSCONVERT_TOKEN`; no `apiconvert` é o `XLSCONVERT_WEBP_TOKEN`, e sem
+//! ele a rota não é registrada.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -44,6 +48,10 @@ pub struct Config {
     pub timeout: Duration,
     pub limits: Limits,
     pub compat: CompatStore,
+    /// Token da rota `/webp`; `None` desliga a rota.
+    pub webp_token: Option<String>,
+    /// Teto de largura × altura da imagem decodificada em `/webp`.
+    pub webp_max_pixels: u64,
 }
 
 impl std::fmt::Debug for Config {
@@ -58,6 +66,8 @@ impl std::fmt::Debug for Config {
             .field("timeout", &self.timeout)
             .field("limits", &self.limits)
             .field("compat", &self.compat)
+            .field("webp_token", &self.webp_token.as_ref().map(|_| "<oculto>"))
+            .field("webp_max_pixels", &self.webp_max_pixels)
             .finish()
     }
 }
@@ -66,6 +76,8 @@ impl std::fmt::Debug for Config {
 pub enum ConfigError {
     #[error("XLSCONVERT_TOKEN ausente ou com menos de {MIN_TOKEN_LEN} caracteres")]
     Token,
+    #[error("XLSCONVERT_WEBP_TOKEN com menos de {MIN_TOKEN_LEN} caracteres")]
+    WebpToken,
     #[error("valor inválido em {0}")]
     Invalid(&'static str),
 }
@@ -88,9 +100,18 @@ impl Config {
         };
 
         let token = get("XLSCONVERT_TOKEN").unwrap_or_default();
-        if mode == Mode::Interno && (token.trim().len() < MIN_TOKEN_LEN || token.trim() != token) {
+        if mode == Mode::Interno && !token_valid(&token) {
             return Err(ConfigError::Token);
         }
+        let webp_token = match mode {
+            Mode::Interno => Some(token.clone()),
+            Mode::Apiconvert => match get("XLSCONVERT_WEBP_TOKEN") {
+                None => None,
+                Some(t) if t.is_empty() => None,
+                Some(t) if token_valid(&t) => Some(t),
+                Some(_) => return Err(ConfigError::WebpToken),
+            },
+        };
 
         let default_bind = match mode {
             Mode::Interno => "127.0.0.1:9320",
@@ -104,6 +125,7 @@ impl Config {
         let ttl_secs: u64 = parse_or(&get, "XLSCONVERT_COMPAT_TTL_SECS", "3600")?;
         let store_mb: usize = parse_or(&get, "XLSCONVERT_COMPAT_MAX_STORE_MB", "256")?;
         let max_entries: usize = parse_or(&get, "XLSCONVERT_COMPAT_MAX_ENTRIES", "2000")?;
+        let webp_max_pixels: u64 = parse_or(&get, "XLSCONVERT_WEBP_MAX_PIXELS", "25000000")?;
         if max_body_mb == 0
             || max_concurrent == 0
             || timeout_secs == 0
@@ -111,6 +133,7 @@ impl Config {
             || ttl_secs == 0
             || store_mb == 0
             || max_entries == 0
+            || webp_max_pixels == 0
         {
             return Err(ConfigError::Invalid(
                 "limites (precisam ser maiores que zero)",
@@ -132,8 +155,14 @@ impl Config {
                 max_bytes: store_mb * 1024 * 1024,
                 max_entries,
             },
+            webp_token,
+            webp_max_pixels,
         })
     }
+}
+
+fn token_valid(t: &str) -> bool {
+    t.trim().len() >= MIN_TOKEN_LEN && t.trim() == t
 }
 
 fn parse_or<T: std::str::FromStr>(
@@ -191,6 +220,30 @@ mod tests {
             ("XLSCONVERT_MAX_CONCURRENT", "0")
         ]))
         .is_err());
+    }
+
+    #[test]
+    fn token_do_webp_por_modo() {
+        let tok = "x".repeat(MIN_TOKEN_LEN);
+        let cfg = Config::from_lookup(lookup(&[("XLSCONVERT_TOKEN", &tok)])).unwrap();
+        assert_eq!(cfg.webp_token.as_deref(), Some(tok.as_str()));
+
+        let cfg = Config::from_lookup(lookup(&[("XLSCONVERT_MODE", "apiconvert")])).unwrap();
+        assert_eq!(cfg.webp_token, None);
+        let cfg = Config::from_lookup(lookup(&[
+            ("XLSCONVERT_MODE", "apiconvert"),
+            ("XLSCONVERT_WEBP_TOKEN", &tok),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.webp_token.as_deref(), Some(tok.as_str()));
+        assert!(!format!("{cfg:?}").contains(&tok));
+        assert!(matches!(
+            Config::from_lookup(lookup(&[
+                ("XLSCONVERT_MODE", "apiconvert"),
+                ("XLSCONVERT_WEBP_TOKEN", "curto"),
+            ])),
+            Err(ConfigError::WebpToken)
+        ));
     }
 
     #[test]

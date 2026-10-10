@@ -40,12 +40,19 @@ jobs:
         with:
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
+      # A libwebp (C) compila com os headers da musl, não os da glibc.
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
       - run: cargo build --release --locked --target x86_64-unknown-linux-musl
       - name: Binário é estático
         run: |
           B=target/x86_64-unknown-linux-musl/release/xlsconvert
           file "$B"
           file "$B" | grep -q "static"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xlsconvert-x86_64-linux-musl
+          path: target/x86_64-unknown-linux-musl/release/xlsconvert
+          retention-days: 14
 
   audit:
     name: cargo audit
