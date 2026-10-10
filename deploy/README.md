@@ -75,4 +75,5 @@ Com o modo `apiconvert`, `http://<servidor>:9098/` abre as telas de teste de pla
 ## Operação
 
 - Logs: `journalctl -u xlsconvert-apiconvert -f` (tamanho, duração e resultado de cada conversão; nunca o conteúdo nem o nome do arquivo).
-- Os resultados ficam disponíveis para `GET` por 1 hora (`XLSCONVERT_COMPAT_TTL_SECS`), com teto de 256 MB (`XLSCONVERT_COMPAT_MAX_STORE_MB`) e 2.000 arquivos (`XLSCONVERT_COMPAT_MAX_ENTRIES`). Reiniciar o serviço descarta os resultados ainda não baixados.
+- Os resultados ficam disponíveis para `GET` por 5 minutos (`XLSCONVERT_COMPAT_TTL_SECS`), com teto de 256 MB (`XLSCONVERT_COMPAT_MAX_STORE_MB`) e 2.000 arquivos (`XLSCONVERT_COMPAT_MAX_ENTRIES`). Reiniciar o serviço descarta os resultados ainda não baixados.
+- O `GET` só entrega o resultado ao mesmo IP que fez o `POST` (`XLSCONVERT_COMPAT_BIND_IP=1`) e uma única vez (`XLSCONVERT_COMPAT_ONE_TIME=1`); um IP que pede mais de 30 nomes inexistentes por minuto (`XLSCONVERT_COMPAT_MAX_MISSES_PER_MIN`) recebe 404 sem consulta até o fim da janela. O cliente do ERP envia e baixa da mesma máquina, uma vez. Se algum cliente sair por IPs diferentes entre o `POST` e o `GET` (NAT com vários IPs), o download falha com 404: nesse caso, `XLSCONVERT_COMPAT_BIND_IP=0` no `.env` volta ao comportamento anterior para todos.

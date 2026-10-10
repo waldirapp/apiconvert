@@ -78,23 +78,33 @@ async fn post_valido_devolve_nome_e_get_baixa_com_content_disposition() {
     assert_eq!(header(&h, "content-type"), XLSX_MIME.as_bytes());
     assert_eq!(body, b"tmp33E7.xlsx");
 
-    for _ in 0..2 {
-        // O legado permite baixar de novo.
-        let (st, h, body) = send(
-            &app,
-            Request::get("/convert?file=tmp33E7.xlsx")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(st, StatusCode::OK);
-        assert_eq!(header(&h, "content-type"), XLSX_MIME.as_bytes());
-        assert_eq!(
-            header(&h, "content-disposition"),
-            b"attachment; filename=\"tmp33E7.xlsx\""
-        );
-        assert!(body.starts_with(b"PK\x03\x04"));
-    }
+    let (st, h, body) = send(
+        &app,
+        Request::get("/convert?file=tmp33E7.xlsx")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(header(&h, "content-type"), XLSX_MIME.as_bytes());
+    assert_eq!(
+        header(&h, "content-disposition"),
+        b"attachment; filename=\"tmp33E7.xlsx\""
+    );
+    assert!(body.starts_with(b"PK\x03\x04"));
+
+    // Divergência intencional (GHSA-jc42-3ccg-wf85): o legado permitia baixar
+    // de novo; aqui o resultado é entregue uma única vez. O cliente baixa uma
+    // vez só, logo depois do POST (dUploadXlsApi.UploadXlsApi).
+    let (st, _, body) = send(
+        &app,
+        Request::get("/convert?file=tmp33E7.xlsx")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert_eq!(body, b"<HTML><BODY><B>404 Not Found</B></BODY></HTML>");
 }
 
 #[tokio::test]
@@ -139,7 +149,8 @@ async fn nome_com_acento_volta_em_latin1_e_o_get_funciona() {
         header(&h, "content-disposition"),
         b"attachment; filename=\"NF recebidas a\xe7\xe3o.xlsx\"".to_vec()
     );
-    // e em Latin-1 percent-encoded
+    // e em Latin-1 percent-encoded (novo envio: o resultado é de uso único)
+    send(&app, post_multipart(multipart("f", Some(nome), XLS))).await;
     let (st, _, _) = send(
         &app,
         Request::get("/convert?file=NF%20recebidas%20a%E7%E3o.xlsx")
@@ -171,6 +182,20 @@ async fn nome_fora_de_latin1_volta_com_interrogacao_e_o_get_desse_nome_funciona(
     assert_eq!(st, StatusCode::OK);
 }
 
+/// O `.xlsx` tem o texto `t` nas strings compartilhadas.
+fn contem_texto(xlsx: &[u8], t: &str) -> bool {
+    use std::io::Read;
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(xlsx)).unwrap();
+    let mut xml = String::new();
+    match z.by_name("xl/sharedStrings.xml") {
+        Ok(mut f) => {
+            f.read_to_string(&mut xml).unwrap();
+        }
+        Err(_) => return false,
+    }
+    xml.contains(t)
+}
+
 #[tokio::test]
 async fn alias_nao_substitui_resultado_com_o_mesmo_nome() {
     let app = app();
@@ -178,7 +203,6 @@ async fn alias_nao_substitui_resultado_com_o_mesmo_nome() {
     let (_, _, body) = send(&app, post_multipart(multipart("f", Some(b"a?.xls"), XLS))).await;
     assert_eq!(body, b"a?.xlsx");
     let get = |q: &'static str| Request::get(q).body(Body::empty()).unwrap();
-    let (_, _, primeiro) = send(&app, get("/convert?file=a%3F.xlsx")).await;
 
     // 2º: "a€.xls" também devolve "a?.xlsx", com outra planilha
     let mut wb = rust_xlsxwriter::Workbook::new();
@@ -195,13 +219,153 @@ async fn alias_nao_substitui_resultado_com_o_mesmo_nome() {
     assert_eq!(body, b"a?.xlsx");
 
     // o primeiro resultado continua sob o nome dele
-    let (st, _, depois) = send(&app, get("/convert?file=a%3F.xlsx")).await;
+    let (st, _, primeiro) = send(&app, get("/convert?file=a%3F.xlsx")).await;
     assert_eq!(st, StatusCode::OK);
-    assert_eq!(primeiro, depois);
+    assert!(!contem_texto(&primeiro, "outra"));
     // e o segundo segue baixável pelo nome primário (UTF-8)
     let (st, _, segundo) = send(&app, get("/convert?file=a%E2%82%AC.xlsx")).await;
     assert_eq!(st, StatusCode::OK);
-    assert_ne!(primeiro, segundo);
+    assert!(contem_texto(&segundo, "outra"));
+}
+
+fn de(ip: [u8; 4], mut req: Request<Body>) -> Request<Body> {
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            ip, 40000,
+        ))));
+    req
+}
+
+fn get_de(ip: [u8; 4], uri: &str) -> Request<Body> {
+    de(ip, Request::get(uri).body(Body::empty()).unwrap())
+}
+
+const CLIENTE: [u8; 4] = [200, 1, 1, 10];
+const OUTRO: [u8; 4] = [203, 0, 113, 66];
+
+#[tokio::test]
+async fn resultado_so_e_entregue_ao_ip_que_enviou() {
+    let app = app();
+    let (st, _, nome) = send(
+        &app,
+        de(
+            CLIENTE,
+            post_multipart(multipart("x", Some(b"tmp1A2B.xls"), XLS)),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(nome, b"tmp1A2B.xlsx");
+
+    // outro IP com o nome certo: 404 do legado, e o resultado não é consumido
+    let (st, _, body) = send(&app, get_de(OUTRO, "/convert?file=tmp1A2B.xlsx")).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert_eq!(body, b"<HTML><BODY><B>404 Not Found</B></BODY></HTML>");
+    // nem sem a informação de IP
+    let (st, _, _) = send(
+        &app,
+        Request::get("/convert?file=tmp1A2B.xlsx")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+
+    let (st, _, xlsx) = send(&app, get_de(CLIENTE, "/convert?file=tmp1A2B.xlsx")).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(xlsx.starts_with(b"PK\x03\x04"));
+}
+
+#[tokio::test]
+async fn mesmo_nome_de_ips_diferentes_nao_se_misturam() {
+    let app = app();
+    let mut wb = rust_xlsxwriter::Workbook::new();
+    let s = wb.add_worksheet();
+    s.write_string(0, 0, "H").unwrap();
+    s.write_string(1, 0, "outra").unwrap();
+    let outra = wb.save_to_buffer().unwrap();
+    send(
+        &app,
+        de(
+            CLIENTE,
+            post_multipart(multipart("x", Some(b"tmp0001.xls"), XLS)),
+        ),
+    )
+    .await;
+    send(
+        &app,
+        de(
+            OUTRO,
+            post_multipart(multipart("x", Some(b"tmp0001.xls"), &outra)),
+        ),
+    )
+    .await;
+
+    let (st, _, do_cliente) = send(&app, get_de(CLIENTE, "/convert?file=tmp0001.xlsx")).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(!contem_texto(&do_cliente, "outra"));
+    let (st, _, do_outro) = send(&app, get_de(OUTRO, "/convert?file=tmp0001.xlsx")).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(contem_texto(&do_outro, "outra"));
+}
+
+#[tokio::test]
+async fn varredura_de_nomes_bloqueia_o_ip() {
+    let app = app();
+    send(
+        &app,
+        de(
+            CLIENTE,
+            post_multipart(multipart("x", Some(b"tmpBEEF.xls"), XLS)),
+        ),
+    )
+    .await;
+    // 30 nomes inexistentes no minuto (o padrão) a partir do mesmo IP...
+    for i in 0..30 {
+        let uri = format!("/convert?file=tmp{i:04X}.xlsx");
+        let (st, _, _) = send(&app, get_de(CLIENTE, &uri)).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+    }
+    // ...e até o nome certo responde 404 até o fim da janela
+    let (st, _, body) = send(&app, get_de(CLIENTE, "/convert?file=tmpBEEF.xlsx")).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert_eq!(body, b"<HTML><BODY><B>404 Not Found</B></BODY></HTML>");
+    // outro IP não é afetado
+    send(
+        &app,
+        de(
+            OUTRO,
+            post_multipart(multipart("x", Some(b"tmpCAFE.xls"), XLS)),
+        ),
+    )
+    .await;
+    let (st, _, _) = send(&app, get_de(OUTRO, "/convert?file=tmpCAFE.xlsx")).await;
+    assert_eq!(st, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn protecoes_desligadas_voltam_ao_comportamento_do_legado() {
+    let pairs = [
+        ("XLSCONVERT_MODE".to_string(), "apiconvert".to_string()),
+        ("XLSCONVERT_COMPAT_BIND_IP".to_string(), "0".to_string()),
+        ("XLSCONVERT_COMPAT_ONE_TIME".to_string(), "0".to_string()),
+    ];
+    let cfg =
+        Config::from_lookup(move |k| pairs.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.clone()))
+            .unwrap();
+    let app = xlsconvert::router(cfg);
+    send(
+        &app,
+        de(
+            CLIENTE,
+            post_multipart(multipart("x", Some(b"tmp9999.xls"), XLS)),
+        ),
+    )
+    .await;
+    for ip in [OUTRO, CLIENTE] {
+        let (st, _, _) = send(&app, get_de(ip, "/convert?file=tmp9999.xlsx")).await;
+        assert_eq!(st, StatusCode::OK);
+    }
 }
 
 #[tokio::test]

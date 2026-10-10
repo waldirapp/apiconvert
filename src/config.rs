@@ -36,6 +36,26 @@ pub struct CompatStore {
     pub max_bytes: usize,
     /// Teto de arquivos guardados ao mesmo tempo.
     pub max_entries: usize,
+    /// O `GET` só entrega o resultado ao IP que fez o `POST`.
+    pub bind_ip: bool,
+    /// O resultado sai do armazenamento no primeiro `GET` que o entrega.
+    pub one_time: bool,
+    /// Nomes inexistentes por IP, por minuto, antes de o `GET` parar de
+    /// consultar o armazenamento para esse IP.
+    pub max_misses_per_min: u32,
+}
+
+impl Default for CompatStore {
+    fn default() -> Self {
+        Self {
+            ttl: Duration::from_secs(300),
+            max_bytes: 256 * 1024 * 1024,
+            max_entries: 2000,
+            bind_ip: true,
+            one_time: true,
+            max_misses_per_min: 30,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -128,27 +148,24 @@ impl Config {
         let max_concurrent: usize = parse_or(&get, "XLSCONVERT_MAX_CONCURRENT", "2")?;
         let timeout_secs: u64 = parse_or(&get, "XLSCONVERT_TIMEOUT_SECS", "60")?;
         let max_cells: u64 = parse_or(&get, "XLSCONVERT_MAX_CELLS", "5000000")?;
-        let ttl_secs: u64 = parse_or(&get, "XLSCONVERT_COMPAT_TTL_SECS", "3600")?;
+        let ttl_secs: u64 = parse_or(&get, "XLSCONVERT_COMPAT_TTL_SECS", "300")?;
+        let bind_ip = flag(&get, "XLSCONVERT_COMPAT_BIND_IP", true)?;
+        let one_time = flag(&get, "XLSCONVERT_COMPAT_ONE_TIME", true)?;
+        let max_misses_per_min: u32 = parse_or(&get, "XLSCONVERT_COMPAT_MAX_MISSES_PER_MIN", "30")?;
         let store_mb: usize = parse_or(&get, "XLSCONVERT_COMPAT_MAX_STORE_MB", "256")?;
         let max_entries: usize = parse_or(&get, "XLSCONVERT_COMPAT_MAX_ENTRIES", "2000")?;
         let webp_max_pixels: u64 = parse_or(&get, "XLSCONVERT_WEBP_MAX_PIXELS", "25000000")?;
         // Telas: ligadas por padrão no modo apiconvert (já exposto), desligadas
         // no interno (só para o serviço chamador).
         let ui_padrao = if mode == Mode::Apiconvert { "1" } else { "0" };
-        let ui = match get("XLSCONVERT_UI")
-            .unwrap_or_else(|| ui_padrao.to_string())
-            .trim()
-        {
-            "1" | "true" | "sim" => true,
-            "0" | "false" | "nao" | "não" => false,
-            _ => return Err(ConfigError::Invalid("XLSCONVERT_UI")),
-        };
+        let ui = flag(&get, "XLSCONVERT_UI", ui_padrao == "1")?;
         let ui_rate_per_min: u32 = parse_or(&get, "XLSCONVERT_UI_RATE_PER_MIN", "30")?;
         if max_body_mb == 0
             || max_concurrent == 0
             || timeout_secs == 0
             || max_cells == 0
             || ttl_secs == 0
+            || max_misses_per_min == 0
             || store_mb == 0
             || max_entries == 0
             || webp_max_pixels == 0
@@ -173,6 +190,9 @@ impl Config {
                 ttl: Duration::from_secs(ttl_secs),
                 max_bytes: store_mb * 1024 * 1024,
                 max_entries,
+                bind_ip,
+                one_time,
+                max_misses_per_min,
             },
             webp_token,
             webp_max_pixels,
@@ -184,6 +204,21 @@ impl Config {
 
 fn token_valid(t: &str) -> bool {
     t.trim().len() >= MIN_TOKEN_LEN && t.trim() == t
+}
+
+fn flag(
+    get: &impl Fn(&str) -> Option<String>,
+    key: &'static str,
+    default: bool,
+) -> Result<bool, ConfigError> {
+    match get(key) {
+        None => Ok(default),
+        Some(v) => match v.trim() {
+            "1" | "true" | "sim" => Ok(true),
+            "0" | "false" | "nao" | "não" => Ok(false),
+            _ => Err(ConfigError::Invalid(key)),
+        },
+    }
 }
 
 fn parse_or<T: std::str::FromStr>(
@@ -272,7 +307,22 @@ mod tests {
         let cfg = Config::from_lookup(lookup(&[("XLSCONVERT_MODE", "apiconvert")])).unwrap();
         assert_eq!(cfg.mode, Mode::Apiconvert);
         assert_eq!(cfg.bind.port(), 9098);
-        assert_eq!(cfg.compat.ttl, Duration::from_secs(3600));
+        // Download protegido por padrão (GHSA-jc42-3ccg-wf85).
+        assert_eq!(cfg.compat.ttl, Duration::from_secs(300));
+        assert!(cfg.compat.bind_ip && cfg.compat.one_time);
+        assert_eq!(cfg.compat.max_misses_per_min, 30);
+        let aberto = Config::from_lookup(lookup(&[
+            ("XLSCONVERT_MODE", "apiconvert"),
+            ("XLSCONVERT_COMPAT_BIND_IP", "0"),
+            ("XLSCONVERT_COMPAT_ONE_TIME", "0"),
+        ]))
+        .unwrap();
+        assert!(!aberto.compat.bind_ip && !aberto.compat.one_time);
+        assert!(Config::from_lookup(lookup(&[
+            ("XLSCONVERT_MODE", "apiconvert"),
+            ("XLSCONVERT_COMPAT_BIND_IP", "talvez"),
+        ]))
+        .is_err());
     }
 
     #[test]

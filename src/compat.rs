@@ -22,8 +22,17 @@
 //!   cliente e serve qualquer arquivo da pasta pelo `?file=`; aqui o
 //!   resultado fica em memória, indexado pelo nome, e o `GET` só devolve o
 //!   que o próprio serviço converteu. Nenhum nome vira caminho de arquivo;
-//! - os resultados expiram (`XLSCONVERT_COMPAT_TTL_SECS`, padrão 1 hora) e
+//! - os resultados expiram (`XLSCONVERT_COMPAT_TTL_SECS`, padrão 5 minutos) e
 //!   há teto de memória; o legado acumulava arquivos indefinidamente;
+//! - o resultado só é entregue ao mesmo IP que fez o `POST`
+//!   (`XLSCONVERT_COMPAT_BIND_IP`) e uma única vez
+//!   (`XLSCONVERT_COMPAT_ONE_TIME`); um IP que acumula nomes inexistentes no
+//!   `GET` passa a receber 404 sem consulta até o fim da janela
+//!   (`XLSCONVERT_COMPAT_MAX_MISSES_PER_MIN`). O nome do arquivo vem do
+//!   temporário do Delphi (`tmpXXXX`, 65.536 combinações), e sem isso
+//!   qualquer um baixaria a planilha de outro cliente varrendo os nomes
+//!   (GHSA-jc42-3ccg-wf85). O cliente (`dUploadXlsApi.UploadXlsApi`) faz o
+//!   `POST` e um único `GET` em seguida, da mesma máquina;
 //! - nome com acento: o legado devolvia o nome em Latin-1 e depois falhava no
 //!   `GET` (500); aqui o `GET` aceita o nome em UTF-8 ou Latin-1;
 //! - nome com caractere de controle ou aspas é recusado no `POST` (500), para
@@ -38,12 +47,15 @@
 //! sai como texto. O valor lido é o mesmo.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::multipart::MultipartRejection;
-use axum::extract::{DefaultBodyLimit, Multipart, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Multipart, State};
+use axum::http::request::Parts;
 use axum::http::{header, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -153,14 +165,68 @@ impl Store {
         }
     }
 
-    fn get(&self, name: &str) -> Option<Bytes> {
-        let entries = self.lock();
+    /// Resultado guardado sob `name` (nome primário ou alias). Com
+    /// `consume`, o resultado e os aliases dele saem do armazenamento.
+    fn take(&self, name: &str, consume: bool) -> Option<Bytes> {
+        let mut entries = self.lock();
         let key = if entries.primary.contains_key(name) {
-            name
+            name.to_string()
         } else {
-            entries.aliases.get(name)?.as_str()
+            entries.aliases.get(name)?.clone()
         };
-        entries.primary.get(key).map(|e| e.xlsx.clone())
+        if consume {
+            let e = entries.primary.remove(&key)?;
+            entries.drop_orphan_aliases();
+            Some(e.xlsx)
+        } else {
+            entries.primary.get(&key).map(|e| e.xlsx.clone())
+        }
+    }
+}
+
+/// IP de quem chamou (`ConnectInfo`); `None` sem a informação (testes).
+pub(crate) struct ClientIp(pub Option<IpAddr>);
+
+impl<S: Send + Sync> FromRequestParts<S> for ClientIp {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|c| c.0.ip()),
+        ))
+    }
+}
+
+/// Nomes inexistentes pedidos por IP numa janela de 1 minuto.
+struct Misses {
+    max: u32,
+    map: Mutex<HashMap<Option<IpAddr>, (Instant, u32)>>,
+}
+
+impl Misses {
+    fn bloqueado(&self, ip: Option<IpAddr>) -> bool {
+        let mut map = self.map.lock().unwrap_or_else(|p| p.into_inner());
+        map.retain(|_, (inicio, _)| inicio.elapsed() < Duration::from_secs(60));
+        map.get(&ip).is_some_and(|(_, n)| *n >= self.max)
+    }
+
+    fn registrar(&self, ip: Option<IpAddr>) {
+        let mut map = self.map.lock().unwrap_or_else(|p| p.into_inner());
+        map.entry(ip).or_insert((Instant::now(), 0)).1 += 1;
+    }
+}
+
+/// Chave do resultado: com `bind_ip`, o IP de origem faz parte dela, então
+/// outro IP não alcança o resultado nem o substitui.
+fn store_key(cfg: &CompatStore, ip: Option<IpAddr>, name: &str) -> String {
+    if cfg.bind_ip {
+        let ip = ip.map(|i| i.to_string()).unwrap_or_default();
+        format!("{ip}\u{0}{name}")
+    } else {
+        name.to_string()
     }
 }
 
@@ -169,6 +235,7 @@ struct CompatState {
     cfg: Arc<Config>,
     permits: Arc<Semaphore>,
     store: Arc<Store>,
+    misses: Arc<Misses>,
 }
 
 pub fn router(cfg: Config) -> Router {
@@ -179,6 +246,10 @@ pub fn router(cfg: Config) -> Router {
     let state = CompatState {
         permits,
         store: Arc::new(Store::new(cfg.compat)),
+        misses: Arc::new(Misses {
+            max: cfg.compat.max_misses_per_min,
+            map: Mutex::new(HashMap::new()),
+        }),
         cfg: Arc::new(cfg),
     };
     let router = Router::new()
@@ -275,6 +346,7 @@ pub(crate) fn latin1(s: &str) -> Vec<u8> {
 
 async fn post_convert(
     State(st): State<CompatState>,
+    ClientIp(ip): ClientIp,
     multipart: Result<Multipart, MultipartRejection>,
 ) -> Response {
     let Ok(mut multipart) = multipart else {
@@ -341,7 +413,8 @@ async fn post_convert(
             // de quem usa o nome recebido funcionar, sem tomar o lugar de outro
             // resultado que já tenha esse nome.
             let alias: String = returned.iter().map(|&b| char::from(b)).collect();
-            if !st.store.put(out_name.clone(), xlsx.clone()) {
+            let key = store_key(&st.cfg.compat, ip, &out_name);
+            if !st.store.put(key.clone(), xlsx.clone()) {
                 tracing::warn!(
                     saida = xlsx.len(),
                     "resultado acima do teto de armazenamento"
@@ -349,7 +422,8 @@ async fn post_convert(
                 return erro_gravar();
             }
             if alias != out_name {
-                st.store.put_alias(alias, &out_name);
+                st.store
+                    .put_alias(store_key(&st.cfg.compat, ip, &alias), &key);
             }
             let mut resp = (StatusCode::OK, returned).into_response();
             let h = resp.headers_mut();
@@ -416,12 +490,18 @@ fn percent_decode(input: &[u8]) -> Vec<u8> {
     out
 }
 
-async fn get_convert(State(st): State<CompatState>, uri: Uri) -> Response {
+async fn get_convert(State(st): State<CompatState>, ClientIp(ip): ClientIp, uri: Uri) -> Response {
     let Some(candidates) = query_file(&uri) else {
         return file_not_found();
     };
+    if st.misses.bloqueado(ip) {
+        tracing::warn!("GET recusado: IP acima do limite de nomes inexistentes");
+        return file_not_found();
+    }
+    let consume = st.cfg.compat.one_time;
     for name in candidates {
-        if let Some(xlsx) = st.store.get(&name) {
+        let key = store_key(&st.cfg.compat, ip, &name);
+        if let Some(xlsx) = st.store.take(&key, consume) {
             let mut disposition = b"attachment; filename=\"".to_vec();
             disposition.extend_from_slice(&latin1(&name));
             disposition.push(b'"');
@@ -436,6 +516,7 @@ async fn get_convert(State(st): State<CompatState>, uri: Uri) -> Response {
             return resp;
         }
     }
+    st.misses.registrar(ip);
     file_not_found()
 }
 
@@ -488,28 +569,30 @@ mod tests {
             ttl: Duration::from_secs(3600),
             max_bytes: 10,
             max_entries: 2,
+            ..CompatStore::default()
         });
         store.put("a".into(), Bytes::from_static(b"1234"));
         store.put("b".into(), Bytes::from_static(b"1234"));
         store.put("c".into(), Bytes::from_static(b"1234"));
         assert!(
-            store.get("a").is_none(),
+            store.take("a", false).is_none(),
             "o mais antigo sai pelo teto de entradas"
         );
-        assert!(store.get("b").is_some() && store.get("c").is_some());
+        assert!(store.take("b", false).is_some() && store.take("c", false).is_some());
         assert!(
             !store.put("grande".into(), Bytes::from(vec![0u8; 11])),
             "acima do teto de bytes não é guardado e o chamador fica sabendo"
         );
-        assert!(store.get("grande").is_none());
+        assert!(store.take("grande", false).is_none());
 
         let curto = Store::new(CompatStore {
             ttl: Duration::from_millis(1),
             max_bytes: 100,
             max_entries: 10,
+            ..CompatStore::default()
         });
         curto.put("x".into(), Bytes::from_static(b"1"));
         std::thread::sleep(Duration::from_millis(5));
-        assert!(curto.get("x").is_none(), "expirado");
+        assert!(curto.take("x", false).is_none(), "expirado");
     }
 }

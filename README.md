@@ -114,6 +114,10 @@ O serviço foi feito para ficar atrás de outro serviço na mesma máquina, que 
 | `XLSCONVERT_MAX_CELLS` | `5000000` | Teto de células da primeira aba |
 | `XLSCONVERT_LOG` | `info` | Filtro de log (`tracing`) |
 | `XLSCONVERT_WEBP_TOKEN` | — | Só no modo `apiconvert`: token da rota `/webp` (mínimo 32 caracteres). Sem ele a rota não é registrada |
+| `XLSCONVERT_COMPAT_TTL_SECS` | `300` | Modo `apiconvert`: validade do resultado para o `GET` |
+| `XLSCONVERT_COMPAT_BIND_IP` | `1` | Modo `apiconvert`: o `GET` só entrega ao IP que fez o `POST` |
+| `XLSCONVERT_COMPAT_ONE_TIME` | `1` | Modo `apiconvert`: o resultado é entregue uma única vez |
+| `XLSCONVERT_COMPAT_MAX_MISSES_PER_MIN` | `30` | Modo `apiconvert`: nomes inexistentes por IP, por minuto, antes de o `GET` parar de responder a esse IP |
 | `XLSCONVERT_UI` | `1` no `apiconvert`, `0` no `interno` | Liga ou desliga as telas web |
 | `XLSCONVERT_UI_RATE_PER_MIN` | `30` | Conversões por minuto, por IP, nas telas |
 | `XLSCONVERT_WEBP_MAX_PIXELS` | `25000000` (5000×5000; cabe com folga no `MemoryMax=1G` da unit com 2 conversões simultâneas) | Teto de largura × altura da imagem recebida em `/webp` |
