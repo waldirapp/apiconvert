@@ -34,6 +34,21 @@ Cada regra cita, no código, a função do pandas, do xlrd ou do openpyxl que re
 
 Divergência conhecida: o openpyxl grava como célula do tipo erro o texto que é exatamente um código de erro (`#NULL!`, `#DIV/0!`, `#VALUE!`, `#REF!`, `#NAME?`, `#NUM!`); o rust_xlsxwriter não tem API pública para célula de erro, então esse texto sai como texto, com o mesmo valor lido.
 
+## Imagem em WebP (`POST /webp`)
+
+Converte uma imagem em WebP com o mesmo resultado do `cwebp` que o x-duall usa (`cwebp -q 50 -m 6 -jpeg_like -mt -resize`, com o lado maior em 400 px e o outro proporcional; imagem quadrada vai a 400×400 e imagem menor é ampliada) e devolve o WebP em base64, o formato que o x-duall grava no campo da imagem. A libwebp é compilada dentro do binário; não há processo externo.
+
+| Item | Contrato |
+|---|---|
+| Autenticação | Header `X-Internal-Token`. No modo `interno`, o `XLSCONVERT_TOKEN`; no modo `apiconvert`, o `XLSCONVERT_WEBP_TOKEN`, e sem ele a rota não existe |
+| Corpo | Multipart com o arquivo (o primeiro campo com conteúdo) ou os bytes da imagem direto |
+| Entrada | JPEG, PNG, GIF, BMP, TIFF, WebP e ICO, detectados pelo conteúdo |
+| Query | `max`: lado maior (padrão `400`; `0` mantém o tamanho; até `4096`). `q`: qualidade de 0 a 100 (padrão `50`) |
+| 200 | `text/plain; charset=utf-8`: WebP em base64 padrão, sem quebra de linha |
+| Erros | JSON `{"erro", "codigo"}`: 400 `imagem_vazia` ou `parametro_invalido`, 401 `nao_autorizado`, 413 `imagem_grande_demais`, 415 `formato_nao_suportado`, 422 `imagem_invalida`, 503 `ocupado`, 504 `tempo_esgotado` |
+
+Comparado com o `cwebp` 1.2.1 do legado nas mesmas 14 imagens (PNG e JPEG, de 32×32 a 3840×2160), as dimensões foram iguais em todas e o tamanho variou menos de 0,5%. Nas PNG o resultado decodificado foi idêntico pixel a pixel; nas JPEG a diferença vem do decodificador de JPEG, com PSNR entre as duas saídas de 36 a 46 dB. `examples/webp_fidelidade.rs` refaz a comparação.
+
 ## Fidelidade
 
 `tools/fidelidade/` compara o serviço com o pandas de referência, célula a célula, nos arquivos que se quer validar:
@@ -85,6 +100,8 @@ O serviço foi feito para ficar atrás de outro serviço na mesma máquina, que 
 | `XLSCONVERT_TIMEOUT_SECS` | `60` | Tempo máximo de resposta de uma conversão |
 | `XLSCONVERT_MAX_CELLS` | `5000000` | Teto de células da primeira aba |
 | `XLSCONVERT_LOG` | `info` | Filtro de log (`tracing`) |
+| `XLSCONVERT_WEBP_TOKEN` | — | Só no modo `apiconvert`: token da rota `/webp` (mínimo 32 caracteres). Sem ele a rota não é registrada |
+| `XLSCONVERT_WEBP_MAX_PIXELS` | `25000000` (5000×5000; cabe com folga no `MemoryMax=1G` da unit com 2 conversões simultâneas) | Teto de largura × altura da imagem recebida em `/webp` |
 
 O log registra tamanho, duração e resultado, nunca o conteúdo nem o nome original do arquivo.
 
@@ -96,6 +113,8 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 cargo build --release --target x86_64-unknown-linux-musl
 ```
+
+O build musl compila a libwebp em C e precisa do `musl-gcc` (pacote `musl-tools` no Ubuntu); a CI publica o binário como artefato `xlsconvert-x86_64-linux-musl`.
 
 O binário musl é estático e não depende da glibc do sistema. As fixtures de teste são sintéticas; `tests/fixtures/tipos.xls` é gerado de `tests/fixtures/tipos.fods` com `libreoffice --headless --convert-to 'xls:MS Excel 97' tipos.fods`.
 

@@ -28,22 +28,27 @@ struct AppState {
 
 pub fn router(cfg: Config) -> Router {
     let max_body = cfg.max_body_bytes;
+    let imagem = crate::imagem_router(&cfg);
     let state = AppState {
         permits: Arc::new(Semaphore::new(cfg.max_concurrent)),
         cfg: Arc::new(cfg),
     };
-    Router::new()
+    let router = Router::new()
         .route("/health", get(health))
         .route("/convert", post(convert_handler))
         .layer(DefaultBodyLimit::max(max_body))
-        .with_state(state)
+        .with_state(state);
+    match imagem {
+        Some(r) => router.merge(r),
+        None => router,
+    }
 }
 
 async fn health() -> Response {
     json_body(&[("status", "ok")])
 }
 
-fn token_ok(headers: &HeaderMap, expected: &str) -> bool {
+pub(crate) fn token_ok(headers: &HeaderMap, expected: &str) -> bool {
     let Some(got) = headers.get(TOKEN_HEADER) else {
         return false;
     };
@@ -144,7 +149,7 @@ fn classify(e: &ConvertError) -> (StatusCode, &'static str) {
     }
 }
 
-fn error(status: StatusCode, code: &str, msg: &str) -> Response {
+pub(crate) fn error(status: StatusCode, code: &str, msg: &str) -> Response {
     let mut resp = json_body(&[("erro", msg), ("codigo", code)]).into_response();
     *resp.status_mut() = status;
     resp

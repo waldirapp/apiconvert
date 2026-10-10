@@ -173,21 +173,27 @@ struct CompatState {
 
 pub fn router(cfg: Config) -> Router {
     let max_body = cfg.max_body_bytes;
+    let imagem = crate::imagem_router(&cfg);
     let state = CompatState {
         permits: Arc::new(Semaphore::new(cfg.max_concurrent)),
         store: Arc::new(Store::new(cfg.compat)),
         cfg: Arc::new(cfg),
     };
-    Router::new()
+    let router = Router::new()
         .route(
             "/convert",
             post(post_convert)
                 .get(get_convert)
                 .fallback(method_not_allowed),
         )
-        .fallback(route_not_found)
         .layer(DefaultBodyLimit::max(max_body))
-        .with_state(state)
+        .with_state(state);
+    // A rota /webp (com token) entra antes do fallback de 404 do legado.
+    let router = match imagem {
+        Some(r) => router.merge(r),
+        None => router,
+    };
+    router.fallback(route_not_found)
 }
 
 /// Resposta em HTML com o `Content-Type` exato do legado.

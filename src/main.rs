@@ -26,6 +26,11 @@ async fn main() {
     }
     if cfg.mode == Mode::Apiconvert {
         tracing::warn!(bind = %cfg.bind, "modo apiconvert: contrato legado sem autenticação; restrinja o acesso pelo firewall");
+        if cfg.webp_token.is_some() {
+            tracing::info!("rota /webp ativa (token XLSCONVERT_WEBP_TOKEN)");
+        } else {
+            tracing::info!("rota /webp desligada: XLSCONVERT_WEBP_TOKEN não definido");
+        }
     }
 
     let listener = match tokio::net::TcpListener::bind(cfg.bind).await {
