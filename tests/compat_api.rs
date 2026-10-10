@@ -151,6 +151,27 @@ async fn nome_com_acento_volta_em_latin1_e_o_get_funciona() {
 }
 
 #[tokio::test]
+async fn nome_fora_de_latin1_volta_com_interrogacao_e_o_get_desse_nome_funciona() {
+    let app = app();
+    let (st, _, body) = send(
+        &app,
+        post_multipart(multipart("f", Some("relatório€.xls".as_bytes()), XLS)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body, b"relat\xf3rio?.xlsx".to_vec());
+    // o cliente usa o nome recebido: Latin-1, com '?' no lugar do '€'
+    let (st, _, _) = send(
+        &app,
+        Request::get("/convert?file=relat%F3rio%3F.xlsx")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn get_inexistente_ou_sem_parametro_404_do_legado() {
     let app = app();
     for uri in ["/convert?file=tmpZZZZ.xlsx", "/convert", "/convert?outro=1"] {

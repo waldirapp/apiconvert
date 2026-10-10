@@ -27,7 +27,15 @@
 //! - nome com acento: o legado devolvia o nome em Latin-1 e depois falhava no
 //!   `GET` (500); aqui o `GET` aceita o nome em UTF-8 ou Latin-1;
 //! - nome com caractere de controle ou aspas é recusado no `POST` (500), para
-//!   não injetar no header `Content-Disposition`.
+//!   não injetar no header `Content-Disposition`;
+//! - resultado que sozinho passa do teto de armazenamento responde 500 em vez
+//!   de devolver um nome que o `GET` não encontraria.
+//!
+//! Divergência conhecida, sem efeito prático esperado: o openpyxl grava como
+//! célula do tipo erro (`t="e"`) o texto que é exatamente um código de erro
+//! (`#NULL!`, `#DIV/0!`, `#VALUE!`, `#REF!`, `#NAME?`, `#NUM!`, `#N/A`); o
+//! rust_xlsxwriter não tem API pública para célula de erro, então esse texto
+//! sai como texto. O valor lido é o mesmo.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -75,7 +83,11 @@ impl Store {
         map.retain(|_, e| e.created.elapsed() < ttl);
     }
 
-    fn put(&self, name: String, xlsx: Bytes) {
+    /// Guarda o resultado; `false` quando ele sozinho passa do teto de bytes.
+    fn put(&self, name: String, xlsx: Bytes) -> bool {
+        if xlsx.len() > self.cfg.max_bytes {
+            return false;
+        }
         let mut map = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         self.purge_expired(&mut map);
         // O mesmo nome substitui o anterior, como o arquivo sobrescrito no legado.
@@ -96,15 +108,14 @@ impl Store {
                 break;
             }
         }
-        if xlsx.len() <= self.cfg.max_bytes {
-            map.insert(
-                name,
-                Entry {
-                    xlsx,
-                    created: Instant::now(),
-                },
-            );
-        }
+        map.insert(
+            name,
+            Entry {
+                xlsx,
+                created: Instant::now(),
+            },
+        );
+        true
     }
 
     fn get(&self, name: &str) -> Option<Bytes> {
@@ -260,7 +271,7 @@ async fn post_convert(
     let Ok(permit) = permit else {
         return erro_gravar();
     };
-    let limits = st.cfg.limits;
+    let limits = st.cfg.limits.with_timeout(st.cfg.timeout);
     let job = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         convert::convert(&bytes, limits)
@@ -276,8 +287,23 @@ async fn post_convert(
                 elapsed_ms,
                 "conversão concluída"
             );
-            st.store.put(out_name.clone(), Bytes::from(xlsx));
-            let mut resp = (StatusCode::OK, latin1(&out_name)).into_response();
+            let xlsx = Bytes::from(xlsx);
+            let returned = latin1(&out_name);
+            // O nome devolvido é o Latin-1 do nome enviado (caractere fora dele
+            // vira '?'). O resultado fica também sob esse nome exato, para o
+            // GET de quem usa o nome recebido funcionar.
+            let alias: String = returned.iter().map(|&b| char::from(b)).collect();
+            if !st.store.put(out_name.clone(), xlsx.clone()) {
+                tracing::warn!(
+                    saida = xlsx.len(),
+                    "resultado acima do teto de armazenamento"
+                );
+                return erro_gravar();
+            }
+            if alias != out_name {
+                st.store.put(alias, xlsx);
+            }
+            let mut resp = (StatusCode::OK, returned).into_response();
             let h = resp.headers_mut();
             h.insert(header::CONTENT_TYPE, HeaderValue::from_static(XLSX_MIME));
             h.insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
@@ -424,11 +450,11 @@ mod tests {
             "o mais antigo sai pelo teto de entradas"
         );
         assert!(store.get("b").is_some() && store.get("c").is_some());
-        store.put("grande".into(), Bytes::from(vec![0u8; 11]));
         assert!(
-            store.get("grande").is_none(),
-            "acima do teto de bytes não é guardado"
+            !store.put("grande".into(), Bytes::from(vec![0u8; 11])),
+            "acima do teto de bytes não é guardado e o chamador fica sabendo"
         );
+        assert!(store.get("grande").is_none());
 
         let curto = Store::new(CompatStore {
             ttl: Duration::from_millis(1),

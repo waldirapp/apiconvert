@@ -12,7 +12,7 @@
 //!   numérico com espaços nas bordas, sinal, decimal com ponto e expoente).
 
 use super::read::Grid;
-use super::Value;
+use super::{ConvertError, Limits, Value};
 
 /// `pandas._libs.parsers.STR_NA_VALUES` (pandas 2.2.3).
 const STR_NA_VALUES: [&str; 19] = [
@@ -50,14 +50,15 @@ fn is_na_str(s: &str) -> bool {
 }
 
 /// Infere as colunas das linhas de dados (linha 0 é o cabeçalho, descartado).
-pub(crate) fn infer_columns(grid: &Grid) -> Vec<Column> {
+pub(crate) fn infer_columns(grid: &Grid, limits: &Limits) -> Result<Vec<Column>, ConvertError> {
     if grid.height <= 1 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     (0..grid.width as usize)
         .map(|c| {
+            limits.check_deadline()?;
             let values: Vec<&Value> = grid.rows[1..].iter().map(|row| &row[c]).collect();
-            infer_column(&values)
+            Ok(infer_column(&values))
         })
         .collect()
 }

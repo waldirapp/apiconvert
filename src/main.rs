@@ -10,6 +10,8 @@ async fn main() {
             EnvFilter::try_from_env("XLSCONVERT_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .with_target(false)
+        // Sem códigos de cor no journal do systemd: só colore em terminal.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 
     let cfg = match Config::from_env() {

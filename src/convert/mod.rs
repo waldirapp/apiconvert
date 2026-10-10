@@ -21,6 +21,8 @@ mod infer;
 mod read;
 mod write;
 
+use std::time::Instant;
+
 use chrono::{NaiveDateTime, NaiveTime};
 use thiserror::Error;
 
@@ -54,6 +56,28 @@ pub struct Limits {
     pub max_rows: u32,
     pub max_cols: u32,
     pub max_cells: u64,
+    /// Prazo da conversão. Verificado dentro dos laços de leitura, inferência
+    /// e escrita, para que a conversão pare (e libere a vaga) mesmo quando
+    /// quem a chamou já desistiu de esperar. Só o parse inicial do arquivo,
+    /// limitado pelo tamanho máximo do upload, não é interrompível.
+    pub deadline: Option<Instant>,
+}
+
+impl Limits {
+    /// Limites com prazo a partir de agora.
+    pub fn with_timeout(self, timeout: std::time::Duration) -> Self {
+        Self {
+            deadline: Instant::now().checked_add(timeout),
+            ..self
+        }
+    }
+
+    pub(crate) fn check_deadline(&self) -> Result<(), ConvertError> {
+        match self.deadline {
+            Some(d) if Instant::now() >= d => Err(ConvertError::DeadlineExceeded),
+            _ => Ok(()),
+        }
+    }
 }
 
 impl Default for Limits {
@@ -62,6 +86,7 @@ impl Default for Limits {
             max_rows: 1_048_576,
             max_cols: 16_384,
             max_cells: 5_000_000,
+            deadline: None,
         }
     }
 }
@@ -84,21 +109,24 @@ pub enum ConvertError {
     StringTooLong { row: u32, col: u16 },
     #[error("falha ao gerar o .xlsx")]
     Write,
+    #[error("conversão excedeu o tempo limite")]
+    DeadlineExceeded,
 }
 
-/// Converte o conteúdo de um `.xls` ou `.xlsx` no `.xlsx` que o conversor de referência
-/// legada produziria para o mesmo arquivo.
+/// Converte o conteúdo de um `.xls` ou `.xlsx` no `.xlsx` que o conversor de
+/// referência produziria para o mesmo arquivo.
 pub fn convert(input: &[u8], limits: Limits) -> Result<Vec<u8>, ConvertError> {
     if input.is_empty() {
         return Err(ConvertError::EmptyInput);
     }
     let format = read::detect(input).ok_or(ConvertError::UnsupportedFormat)?;
     let grid = read::read_first_sheet(input, format, limits)?;
+    limits.check_deadline()?;
     let labels = grid
         .rows
         .first()
         .map(|row| header::column_labels(row))
         .unwrap_or_default();
-    let columns = infer::infer_columns(&grid);
-    write::write_xlsx(&labels, &columns, grid.data_rows())
+    let columns = infer::infer_columns(&grid, &limits)?;
+    write::write_xlsx(&labels, &columns, grid.data_rows(), &limits)
 }

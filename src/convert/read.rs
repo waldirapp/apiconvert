@@ -214,7 +214,10 @@ fn build_grid(range: &Range<Data>, limits: Limits) -> Result<Grid, ConvertError>
     let mut rows: Vec<Vec<Value>> = (0..height)
         .map(|_| vec![Value::Empty; width as usize])
         .collect();
-    for (r, c, cell) in range.used_cells() {
+    for (i, (r, c, cell)) in range.used_cells().enumerate() {
+        if i % 4096 == 0 {
+            limits.check_deadline()?;
+        }
         let row = start_row as usize + r;
         let col = start_col as usize + c;
         rows[row][col] = parse_cell(cell);

@@ -25,7 +25,7 @@ use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Formula, Workbook, Work
 
 use super::header::Label;
 use super::infer::{Column, ObjValue};
-use super::{ConvertError, Value};
+use super::{ConvertError, Limits, Value};
 
 const SHEET_NAME: &str = "Sheet1";
 const DATETIME_FORMAT: &str = "YYYY-MM-DD HH:MM:SS";
@@ -35,6 +35,7 @@ pub(crate) fn write_xlsx(
     labels: &[Label],
     columns: &[Column],
     data_rows: u32,
+    limits: &Limits,
 ) -> Result<Vec<u8>, ConvertError> {
     let mut workbook = Workbook::new();
     let datetime_fmt = Format::new().set_num_format(DATETIME_FORMAT);
@@ -63,6 +64,9 @@ pub(crate) fn write_xlsx(
     for (c, column) in columns.iter().enumerate() {
         let col = u16::try_from(c).map_err(|_| ConvertError::TooLarge("colunas"))?;
         for r in 0..data_rows {
+            if r % 4096 == 0 {
+                limits.check_deadline()?;
+            }
             let cell = cell_at(column, r as usize);
             write_cell(sheet, r + 1, col, cell, &datetime_fmt, None)?;
         }
@@ -252,6 +256,51 @@ pub(crate) fn python_time_str(t: &NaiveTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cabecalho_na_linha_0_com_estilo_e_data_formatada() {
+        use calamine::{Data, Reader, Xlsx};
+        use std::io::{Cursor, Read};
+
+        let d = NaiveDate::from_ymd_opt(2026, 10, 10)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let labels = vec![
+            Label::Str("NOME".into()),
+            Label::DateTime(d),
+            Label::Int(2024),
+        ];
+        let columns = vec![
+            Column::Object(vec![ObjValue::Value(Value::Str("x".into()))]),
+            Column::Int(vec![1]),
+            Column::Int(vec![2]),
+        ];
+        let out = write_xlsx(&labels, &columns, 1, &Limits::default()).unwrap();
+
+        let mut wb: Xlsx<_> = Xlsx::new(Cursor::new(out.clone())).unwrap();
+        let range = wb.worksheet_range_at(0).unwrap().unwrap();
+        assert_eq!(range.get((0, 0)), Some(&Data::String("NOME".into())));
+        match range.get((0, 1)) {
+            Some(Data::DateTime(dt)) => assert_eq!(dt.as_f64(), 46305.0),
+            other => panic!("cabeçalho de data deveria ser data, veio {other:?}"),
+        }
+        assert_eq!(range.get((0, 2)), Some(&Data::Float(2024.0)));
+        assert_eq!(range.get((1, 0)), Some(&Data::String("x".into())));
+
+        // Estilos: negrito, borda fina, centralizado e o formato de data-hora.
+        let mut zip = zip::ZipArchive::new(Cursor::new(out)).unwrap();
+        let mut styles = String::new();
+        zip.by_name("xl/styles.xml")
+            .unwrap()
+            .read_to_string(&mut styles)
+            .unwrap();
+        assert!(styles.contains("<b/>"));
+        assert!(styles.contains(r#"style="thin""#));
+        assert!(styles.contains(r#"horizontal="center""#));
+        assert!(styles.contains(r#"vertical="top""#));
+        assert!(styles.contains("YYYY-MM-DD HH:MM:SS"));
+    }
 
     #[test]
     fn serial_de_data_como_openpyxl() {

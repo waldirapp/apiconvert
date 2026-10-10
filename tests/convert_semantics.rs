@@ -207,6 +207,20 @@ fn zip_entry(xlsx: &[u8], name: &str) -> String {
 }
 
 #[test]
+fn prazo_vencido_interrompe_a_conversao() {
+    let mut wb = Workbook::new();
+    let s = wb.add_worksheet();
+    s.write_string(0, 0, "A").unwrap();
+    s.write_string(1, 0, "b").unwrap();
+    let input = wb.save_to_buffer().unwrap();
+    let limits = Limits::default().with_timeout(std::time::Duration::ZERO);
+    assert!(matches!(
+        convert(&input, limits),
+        Err(ConvertError::DeadlineExceeded)
+    ));
+}
+
+#[test]
 fn entradas_invalidas() {
     assert!(matches!(
         convert(b"", Limits::default()),

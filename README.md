@@ -32,6 +32,8 @@ O resultado reproduz o comportamento observável daquelas duas linhas, inclusive
 
 Cada regra cita, no código, a função do pandas, do xlrd ou do openpyxl que reproduz (`src/convert/read.rs`, `header.rs`, `infer.rs` e `write.rs`).
 
+Divergência conhecida: o openpyxl grava como célula do tipo erro o texto que é exatamente um código de erro (`#NULL!`, `#DIV/0!`, `#VALUE!`, `#REF!`, `#NAME?`, `#NUM!`); o rust_xlsxwriter não tem API pública para célula de erro, então esse texto sai como texto, com o mesmo valor lido.
+
 ## Fidelidade
 
 `tools/fidelidade/` compara o serviço com o pandas de referência, célula a célula, nos arquivos que se quer validar:
