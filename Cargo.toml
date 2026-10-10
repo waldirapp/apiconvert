@@ -10,12 +10,13 @@ publish = false
 
 [dependencies]
 axum = { version = "0.8", features = ["multipart"] }
+http-body = "1"
 calamine = { version = "0.36", features = ["dates"] }
 cfb = "0.15"
 rust_xlsxwriter = "0.99"
 subtle = "2.6"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time", "process", "io-util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
@@ -24,11 +25,15 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 base64 = "0.22"
 askama = "0.16"
 getrandom = "0.4"
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-zip = { version = "8", default-features = false, features = ["deflate"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 lto = true

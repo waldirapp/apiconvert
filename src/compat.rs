@@ -64,7 +64,6 @@ use tokio::sync::Semaphore;
 
 use crate::app::XLSX_MIME;
 use crate::config::{CompatStore, Config};
-use crate::convert;
 
 const ERRO_GRAVAR: &str = "Erro ao gravar o arquivo";
 const NOT_FOUND_FILE: &str = "<HTML><BODY><B>404 Not Found</B></BODY></HTML>";
@@ -239,6 +238,7 @@ struct CompatState {
 }
 
 pub fn router(cfg: Config) -> Router {
+    let admission_cfg = cfg.clone();
     let max_body = cfg.max_body_bytes;
     let permits = Arc::new(Semaphore::new(cfg.max_concurrent));
     let imagem = crate::imagem_router(&cfg, permits.clone());
@@ -257,16 +257,18 @@ pub fn router(cfg: Config) -> Router {
             "/convert",
             post(post_convert)
                 .get(get_convert)
+                .head(head_convert)
                 .fallback(method_not_allowed),
         )
         .layer(DefaultBodyLimit::max(max_body))
         .with_state(state);
     // /webp (com token) e as telas entram antes do fallback de 404 do legado.
-    [imagem, ui]
+    let router = [imagem, ui]
         .into_iter()
         .flatten()
         .fold(router, |acc, r| acc.merge(r))
-        .fallback(route_not_found)
+        .fallback(route_not_found);
+    crate::admission::apply(router, &admission_cfg)
 }
 
 /// Resposta em HTML com o `Content-Type` exato do legado.
@@ -286,7 +288,7 @@ fn html(
     resp
 }
 
-fn erro_gravar() -> Response {
+pub(crate) fn erro_gravar() -> Response {
     html(
         StatusCode::INTERNAL_SERVER_ERROR,
         "text/html; charset=UTF-8",
@@ -391,15 +393,12 @@ async fn post_convert(
         return erro_gravar();
     };
     let limits = st.cfg.limits.with_timeout(st.cfg.timeout);
-    let job = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        convert::convert(&bytes, limits)
-    });
+    let job = crate::conversion_worker::run(bytes, limits, &st.cfg, Arc::new(permit));
     let outcome = tokio::time::timeout(st.cfg.timeout, job).await;
     let elapsed_ms = started.elapsed().as_millis();
 
     match outcome {
-        Ok(Ok(Ok(xlsx))) => {
+        Ok(Ok(xlsx)) => {
             tracing::info!(
                 bytes = size,
                 saida = xlsx.len(),
@@ -431,12 +430,8 @@ async fn post_convert(
             h.insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
             resp
         }
-        Ok(Ok(Err(e))) => {
+        Ok(Err(e)) => {
             tracing::info!(bytes = size, elapsed_ms, "conversão recusada: {e}");
-            erro_gravar()
-        }
-        Ok(Err(_)) => {
-            tracing::error!(bytes = size, elapsed_ms, "falha interna na conversão");
             erro_gravar()
         }
         Err(_) => {
@@ -491,6 +486,16 @@ fn percent_decode(input: &[u8]) -> Vec<u8> {
 }
 
 async fn get_convert(State(st): State<CompatState>, ClientIp(ip): ClientIp, uri: Uri) -> Response {
+    let consume = st.cfg.compat.one_time;
+    download(st, ip, uri, consume)
+}
+
+async fn head_convert(State(st): State<CompatState>, ClientIp(ip): ClientIp, uri: Uri) -> Response {
+    // Axum remove o corpo da resposta HEAD; consultar não consome o arquivo.
+    download(st, ip, uri, false)
+}
+
+fn download(st: CompatState, ip: Option<IpAddr>, uri: Uri, consume: bool) -> Response {
     let Some(candidates) = query_file(&uri) else {
         return file_not_found();
     };
@@ -498,7 +503,6 @@ async fn get_convert(State(st): State<CompatState>, ClientIp(ip): ClientIp, uri:
         tracing::warn!("GET recusado: IP acima do limite de nomes inexistentes");
         return file_not_found();
     }
-    let consume = st.cfg.compat.one_time;
     for name in candidates {
         let key = store_key(&st.cfg.compat, ip, &name);
         if let Some(xlsx) = st.store.take(&key, consume) {

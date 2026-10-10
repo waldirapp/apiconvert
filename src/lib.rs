@@ -44,9 +44,11 @@ pub(crate) fn ui_router(
     cfg.ui.then(|| ui::router(cfg, permits))
 }
 
+mod admission;
 pub mod app;
 pub mod compat;
 pub mod config;
+pub mod conversion_worker;
 pub mod convert;
 pub mod imagem;
 pub mod ui;

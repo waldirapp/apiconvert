@@ -75,5 +75,8 @@ Com o modo `apiconvert`, `http://<servidor>:9098/` abre as telas de teste de pla
 ## Operação
 
 - Logs: `journalctl -u xlsconvert-apiconvert -f` (tamanho, duração e resultado de cada conversão; nunca o conteúdo nem o nome do arquivo).
+- O recebimento e a fila são limitados por `XLSCONVERT_MAX_INFLIGHT` (padrão: conversões simultâneas + 2), com prazo de upload de 30 segundos. Ao exceder a capacidade, o contrato legado mantém `500` e `Erro ao gravar o arquivo`.
+- Cada conversão de planilha usa um auxiliar do mesmo binário, sem rede nem temporários, com teto de memória virtual de 128 MiB (`XLSCONVERT_WORKER_MEMORY_MB`). O padrão deixa margem para uploads, resultados guardados e dois auxiliares na unit com `MemoryMax=1G`. Para arquivos maiores, ajustar o limite individual e o teto total em conjunto; os limites individuais não reservam memória nem substituem esse teto total.
+- `HEAD /convert?file=` não consome o download de uso único.
 - Os resultados ficam disponíveis para `GET` por 5 minutos (`XLSCONVERT_COMPAT_TTL_SECS`), com teto de 256 MB (`XLSCONVERT_COMPAT_MAX_STORE_MB`) e 2.000 arquivos (`XLSCONVERT_COMPAT_MAX_ENTRIES`). Reiniciar o serviço descarta os resultados ainda não baixados.
 - O `GET` só entrega o resultado ao mesmo IP que fez o `POST` (`XLSCONVERT_COMPAT_BIND_IP=1`) e uma única vez (`XLSCONVERT_COMPAT_ONE_TIME=1`); um IP que pede mais de 30 nomes inexistentes por minuto (`XLSCONVERT_COMPAT_MAX_MISSES_PER_MIN`) recebe 404 sem consulta até o fim da janela. O cliente do ERP envia e baixa da mesma máquina, uma vez. Se algum cliente sair por IPs diferentes entre o `POST` e o `GET` (NAT com vários IPs), o download falha com 404: nesse caso, `XLSCONVERT_COMPAT_BIND_IP=0` no `.env` volta ao comportamento anterior para todos.

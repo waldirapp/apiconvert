@@ -15,7 +15,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::Semaphore;
 
 use crate::config::Config;
-use crate::convert::{self, ConvertError};
+use crate::convert::ConvertError;
 
 pub const TOKEN_HEADER: &str = "x-internal-token";
 pub const XLSX_MIME: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -27,6 +27,7 @@ struct AppState {
 }
 
 pub fn router(cfg: Config) -> Router {
+    let admission_cfg = cfg.clone();
     let max_body = cfg.max_body_bytes;
     let permits = Arc::new(Semaphore::new(cfg.max_concurrent));
     let imagem = crate::imagem_router(&cfg, permits.clone());
@@ -40,10 +41,11 @@ pub fn router(cfg: Config) -> Router {
         .route("/convert", post(convert_handler))
         .layer(DefaultBodyLimit::max(max_body))
         .with_state(state);
-    [imagem, ui]
+    let router = [imagem, ui]
         .into_iter()
         .flatten()
-        .fold(router, |acc, r| acc.merge(r))
+        .fold(router, |acc, r| acc.merge(r));
+    crate::admission::apply(router, &admission_cfg)
 }
 
 async fn health() -> Response {
@@ -79,10 +81,7 @@ async fn convert_handler(State(st): State<AppState>, headers: HeaderMap, body: B
     let started = Instant::now();
     let size = body.len();
     let limits = st.cfg.limits.with_timeout(st.cfg.timeout);
-    let job = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        convert::convert(&body, limits)
-    });
+    let job = crate::conversion_worker::run(body, limits, &st.cfg, Arc::new(permit));
     let outcome = tokio::time::timeout(st.cfg.timeout, job).await;
     let elapsed_ms = started.elapsed().as_millis();
 
@@ -95,15 +94,7 @@ async fn convert_handler(State(st): State<AppState>, headers: HeaderMap, body: B
                 "conversão excedeu o tempo limite",
             )
         }
-        Ok(Err(_)) => {
-            tracing::error!(bytes = size, elapsed_ms, "falha interna na conversão");
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "erro_interno",
-                "falha interna na conversão",
-            )
-        }
-        Ok(Ok(Err(e))) => {
+        Ok(Err(e)) => {
             let (status, code) = classify(&e);
             tracing::info!(
                 bytes = size,
@@ -113,7 +104,7 @@ async fn convert_handler(State(st): State<AppState>, headers: HeaderMap, body: B
             );
             error(status, code, &e.to_string())
         }
-        Ok(Ok(Ok(xlsx))) => {
+        Ok(Ok(xlsx)) => {
             tracing::info!(
                 bytes = size,
                 saida = xlsx.len(),

@@ -9,6 +9,80 @@ use calamine::{Data, Reader, Xlsx};
 use rust_xlsxwriter::{ExcelDateTime, Format, Workbook};
 use xlsconvert::convert::{convert, ConvertError, Limits};
 
+fn iso_fixture(value: &str) -> Vec<u8> {
+    use std::io::{Read, Write};
+    let mut wb = Workbook::new();
+    let sheet = wb.add_worksheet();
+    sheet.write_string(0, 0, "DATA").unwrap();
+    sheet.write_number(1, 0, 123.0).unwrap();
+    let input = wb.save_to_buffer().unwrap();
+    let mut archive = zip::ZipArchive::new(Cursor::new(input)).unwrap();
+    let mut output = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i).unwrap();
+        let name = file.name().to_string();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        if name == "xl/worksheets/sheet1.xml" {
+            bytes = String::from_utf8(bytes)
+                .unwrap()
+                .replace(
+                    "<c r=\"A2\"><v>123</v></c>",
+                    &format!("<c r=\"A2\" t=\"d\"><v>{value}</v></c>"),
+                )
+                .into_bytes();
+        }
+        output
+            .start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        output.write_all(&bytes).unwrap();
+    }
+    output.finish().unwrap().into_inner()
+}
+
+#[test]
+fn datas_iso_sao_datas_e_horas_iso_sao_texto_com_milissegundos() {
+    // Valores esperados fixos; não calculados pelo parser sob teste.
+    for (iso, serial) in [
+        ("2026-10-10", 46305.0),
+        ("2026-10-10T12:00:00", 46305.5),
+        ("2026-10-10T12:00:00.123Z", 46305.50000142361),
+    ] {
+        let out = convert(&iso_fixture(iso), Limits::default()).unwrap();
+        let (_, cells) = read_output(&out);
+        assert!(
+            matches!(cells[1][0], Data::DateTime(_)),
+            "{iso}: {:?}",
+            cells[1][0]
+        );
+        assert!((as_f64(&cells[1][0]).unwrap() - serial).abs() < 1e-10);
+        assert!(zip_entry(&out, "xl/styles.xml").contains("YYYY-MM-DD HH:MM:SS"));
+    }
+    for (iso, expected) in [
+        ("12:30:00", "12:30:00"),
+        ("12:30:00.123", "12:30:00.123000"),
+    ] {
+        let out = convert(&iso_fixture(iso), Limits::default()).unwrap();
+        let (_, cells) = read_output(&out);
+        assert_eq!(cells[1][0], Data::String(expected.into()));
+    }
+}
+
+#[test]
+fn formula_de_texto_nao_inventa_resultado_zero() {
+    let mut wb = Workbook::new();
+    let sheet = wb.add_worksheet();
+    // Fórmulas no cabeçalho e nos dados usam o mesmo contrato.
+    sheet.write_string(0, 0, "=1+1").unwrap();
+    sheet.write_string(1, 0, "=2+2").unwrap();
+    let out = convert(&wb.save_to_buffer().unwrap(), Limits::default()).unwrap();
+    let xml = zip_entry(&out, "xl/worksheets/sheet1.xml");
+    assert!(xml.contains("<f>1+1</f>"));
+    assert!(xml.contains("<f>2+2</f>"));
+    assert!(!xml.contains("<v>0</v>"), "cache deve ficar vazio: {xml}");
+    assert_eq!(xml.matches("<v></v>").count(), 2);
+}
+
 fn read_output(xlsx: &[u8]) -> (String, Vec<Vec<Data>>) {
     let mut wb: Xlsx<_> = Xlsx::new(Cursor::new(xlsx.to_vec())).expect("saída é xlsx válido");
     let name = wb.sheet_names()[0].clone();

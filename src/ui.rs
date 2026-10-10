@@ -34,7 +34,6 @@ use tokio::sync::Semaphore;
 
 use crate::app::XLSX_MIME;
 use crate::config::Config;
-use crate::convert::{self, Limits};
 use crate::webp::{self, WebpParams, MAX_SIDE_LIMIT};
 
 /// Tempo que um resultado fica disponível para download.
@@ -270,7 +269,7 @@ fn html(t: impl Template, status: StatusCode) -> Response {
     }
 }
 
-fn erro(status: StatusCode, mensagem: &str) -> Response {
+pub(crate) fn erro(status: StatusCode, mensagem: &str) -> Response {
     html(Erro { mensagem }, status)
 }
 
@@ -520,28 +519,48 @@ async fn converter_planilha(State(st): State<UiState>, req: Request) -> Response
     };
     let nome = crate::compat::output_name(&form.nome).unwrap_or_else(|| "planilha.xlsx".into());
     let entrada = form.arquivo.len();
-    let limits: Limits = st.cfg.limits.with_timeout(st.cfg.timeout);
+    let limits = st.cfg.limits.with_timeout(st.cfg.timeout);
     let inicio = Instant::now();
     let arquivo = form.arquivo;
-    // A prévia lê o .xlsx gerado: roda na mesma tarefa, com a vaga e o prazo.
+    // A prévia lê o .xlsx gerado e mantém a vaga de CPU e o prazo.
+    let permit = Arc::new(permit);
     let (saida, (linhas, colunas, celulas, cortada, colunas_previa)) =
-        match executar(st.cfg.timeout, permit, move || {
-            convert::convert(&arquivo, limits).map(|x| {
-                let p = previa(&x);
-                (x, p)
-            })
+        match tokio::time::timeout(st.cfg.timeout, async {
+            let converted =
+                crate::conversion_worker::run(arquivo, limits, &st.cfg, permit.clone()).await;
+            match converted {
+                Ok(x) => tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    let p = previa(&x);
+                    Ok((x, p))
+                })
+                .await
+                .map_err(|_| {
+                    Falha(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Falha interna na conversão.",
+                    )
+                }),
+                Err(e) => Ok(Err(e)),
+            }
         })
         .await
         {
-            Ok(Ok(x)) => x,
-            Ok(Err(e)) => {
+            Ok(Ok(Ok(x))) => x,
+            Ok(Ok(Err(e))) => {
                 tracing::info!(bytes = entrada, "tela: planilha recusada: {e}");
                 return erro(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     &primeira_maiuscula(&e.to_string()),
                 );
             }
-            Err(r) => return r.into_response(),
+            Ok(Err(r)) => return r.into_response(),
+            Err(_) => {
+                return erro(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "A conversão excedeu o tempo limite.",
+                )
+            }
         };
     let tempo_ms = inicio.elapsed().as_millis();
     tracing::info!(

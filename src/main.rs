@@ -3,8 +3,18 @@
 use tracing_subscriber::EnvFilter;
 use xlsconvert::config::{Config, Mode};
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    if let Some(code) = xlsconvert::conversion_worker::worker_entry() {
+        std::process::exit(code);
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("runtime Tokio");
+    runtime.block_on(serve());
+}
+
+async fn serve() {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_env("XLSCONVERT_LOG").unwrap_or_else(|_| EnvFilter::new("info")),

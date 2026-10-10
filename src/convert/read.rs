@@ -18,8 +18,8 @@
 
 use std::io::{Cursor, Read};
 
-use calamine::{Data, Range, Reader, Xls, Xlsx};
-use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Timelike};
+use calamine::{Data, DataRef, Range, Reader, Xls, Xlsx};
+use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 
 use super::{ConvertError, Limits, Value};
 
@@ -67,22 +67,236 @@ pub(crate) fn read_first_sheet(
     format: InputFormat,
     limits: Limits,
 ) -> Result<Grid, ConvertError> {
+    limits.check_deadline()?;
     let range = match format {
         InputFormat::Xls => {
-            if !xlrd_accepts_ole2(input) {
-                return Err(ConvertError::InvalidWorkbook);
-            }
+            validate_xls_allocations(input, limits)?;
             let mut wb: Xls<_> =
                 Xls::new(Cursor::new(input)).map_err(|_| ConvertError::InvalidWorkbook)?;
             first_range(&mut wb)?
         }
         InputFormat::Xlsx => {
-            let mut wb: Xlsx<_> =
-                Xlsx::new(Cursor::new(input)).map_err(|_| ConvertError::InvalidWorkbook)?;
-            first_range(&mut wb)?
+            return read_xlsx_bounded(input, limits);
         }
     };
     build_grid(&range, limits)
+}
+
+fn check_extent(height: u32, width: u32, limits: Limits) -> Result<(), ConvertError> {
+    if height > limits.max_rows {
+        return Err(ConvertError::TooLarge("linhas"));
+    }
+    if width > limits.max_cols {
+        return Err(ConvertError::TooLarge("colunas"));
+    }
+    if u64::from(height) * u64::from(width) > limits.max_cells {
+        return Err(ConvertError::TooLarge("células"));
+    }
+    Ok(())
+}
+
+/// Lê cada entrada com teto real, incluindo strings/estilos abertos pelo
+/// calamine antes da aba. O tamanho anunciado no ZIP não basta.
+fn validate_zip_expansion(input: &[u8], limits: Limits) -> Result<(), ConvertError> {
+    let mut zip =
+        zip::ZipArchive::new(Cursor::new(input)).map_err(|_| ConvertError::InvalidWorkbook)?;
+    if zip.len() > 4096 {
+        return Err(ConvertError::TooLarge("entradas ZIP"));
+    }
+    let mut total = 0u64;
+    let mut buffer = [0u8; 8192];
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).map_err(|_| ConvertError::InvalidWorkbook)?;
+        if entry.size() > limits.max_expanded_bytes.saturating_sub(total) {
+            return Err(ConvertError::TooLarge("expansão ZIP"));
+        }
+        loop {
+            limits.check_deadline()?;
+            let n = entry
+                .read(&mut buffer)
+                .map_err(|_| ConvertError::InvalidWorkbook)?;
+            if n == 0 {
+                break;
+            }
+            total = total
+                .checked_add(n as u64)
+                .ok_or(ConvertError::TooLarge("expansão ZIP"))?;
+            if total > limits.max_expanded_bytes {
+                return Err(ConvertError::TooLarge("expansão ZIP"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_xlsx_bounded(input: &[u8], limits: Limits) -> Result<Grid, ConvertError> {
+    validate_zip_expansion(input, limits)?;
+    let mut wb: Xlsx<_> =
+        Xlsx::new(Cursor::new(input)).map_err(|_| ConvertError::InvalidWorkbook)?;
+    let name = wb
+        .sheet_names()
+        .first()
+        .ok_or(ConvertError::NoSheet)?
+        .clone();
+    let mut reader = wb
+        .worksheet_cells_reader(&name)
+        .map_err(|_| ConvertError::InvalidWorkbook)?;
+    let mut cells = Vec::new();
+    let (mut height, mut width) = (0u32, 0u32);
+    let mut text_bytes = 0u64;
+    while let Some(cell) = {
+        limits.check_deadline()?;
+        reader
+            .next_cell()
+            .map_err(|_| ConvertError::InvalidWorkbook)?
+    } {
+        let value = cell.get_value();
+        if matches!(value, DataRef::Empty) {
+            continue;
+        }
+        let (r, c) = cell.get_position();
+        height = height.max(r.checked_add(1).ok_or(ConvertError::TooLarge("linhas"))?);
+        width = width.max(c.checked_add(1).ok_or(ConvertError::TooLarge("colunas"))?);
+        check_extent(height, width, limits)?;
+        if cells.len() as u64 >= limits.max_cells {
+            return Err(ConvertError::TooLarge("células"));
+        }
+        let bytes = match value {
+            DataRef::String(s) | DataRef::DateTimeIso(s) | DataRef::DurationIso(s) => s.len(),
+            DataRef::SharedString(s) => s.len(),
+            _ => 0,
+        };
+        text_bytes = text_bytes
+            .checked_add(bytes as u64)
+            .ok_or(ConvertError::TooLarge("texto"))?;
+        if text_bytes > limits.max_expanded_bytes {
+            return Err(ConvertError::TooLarge("texto"));
+        }
+        let data: Data = value.clone().into();
+        cells.push(((r, c), parse_cell(&data)?));
+    }
+    let mut rows: Vec<Vec<Value>> = (0..height)
+        .map(|_| vec![Value::Empty; width as usize])
+        .collect();
+    for ((r, c), value) in cells {
+        rows[r as usize][c as usize] = value;
+    }
+    Ok(Grid {
+        height,
+        width,
+        rows,
+    })
+}
+
+/// O XLS abre todas as abas e reserva a grade de DIMENSIONS antes de devolver
+/// a primeira. Conferir esses registros e as coordenadas antes de Xls::new.
+fn validate_xls_allocations(input: &[u8], limits: Limits) -> Result<(), ConvertError> {
+    let mut comp =
+        cfb::CompoundFile::open(Cursor::new(input)).map_err(|_| ConvertError::InvalidWorkbook)?;
+    let name = ["/Workbook", "/Book"]
+        .into_iter()
+        .find(|n| comp.is_stream(n))
+        .ok_or(ConvertError::InvalidWorkbook)?;
+    let mut stream = comp
+        .open_stream(name)
+        .map_err(|_| ConvertError::InvalidWorkbook)?;
+    let mut data = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        limits.check_deadline()?;
+        let n = stream
+            .read(&mut buffer)
+            .map_err(|_| ConvertError::InvalidWorkbook)?;
+        if n == 0 {
+            break;
+        }
+        if data.len() as u64 + n as u64 > limits.max_expanded_bytes {
+            return Err(ConvertError::TooLarge("fluxo XLS"));
+        }
+        data.extend_from_slice(&buffer[..n]);
+    }
+    if !biff_bofs_ok(&data) {
+        return Err(ConvertError::InvalidWorkbook);
+    }
+    let mut pos = 0;
+    let mut offsets = Vec::new();
+    while let Some((opcode, len)) = record_header(&data, pos) {
+        let body = data
+            .get(pos + 4..pos + 4 + len)
+            .ok_or(ConvertError::InvalidWorkbook)?;
+        if opcode == BOUNDSHEET {
+            let offset = body.get(..4).ok_or(ConvertError::InvalidWorkbook)?;
+            offsets.push(u32::from_le_bytes(offset.try_into().unwrap()) as usize);
+        }
+        if opcode == EOF {
+            break;
+        }
+        pos += 4 + len;
+    }
+    let mut total_cells = 0u64;
+    for offset in offsets {
+        pos = offset;
+        let (mut height, mut width) = (0u32, 0u32);
+        let mut records = 0u64;
+        while let Some((opcode, len)) = record_header(&data, pos) {
+            limits.check_deadline()?;
+            let body = data
+                .get(pos + 4..pos + 4 + len)
+                .ok_or(ConvertError::InvalidWorkbook)?;
+            if opcode == 0x0200 {
+                let (rf, rl, cf, cl) = match body.len() {
+                    14 => (
+                        u32::from_le_bytes(body[0..4].try_into().unwrap()),
+                        u32::from_le_bytes(body[4..8].try_into().unwrap()),
+                        u16::from_le_bytes(body[8..10].try_into().unwrap()) as u32,
+                        u16::from_le_bytes(body[10..12].try_into().unwrap()) as u32,
+                    ),
+                    10 => (
+                        u16::from_le_bytes(body[0..2].try_into().unwrap()) as u32,
+                        u16::from_le_bytes(body[2..4].try_into().unwrap()) as u32,
+                        u16::from_le_bytes(body[4..6].try_into().unwrap()) as u32,
+                        u16::from_le_bytes(body[6..8].try_into().unwrap()) as u32,
+                    ),
+                    _ => return Err(ConvertError::InvalidWorkbook),
+                };
+                if rl < rf || cl < cf {
+                    return Err(ConvertError::InvalidWorkbook);
+                }
+                height = height.max(rl.max(rf.saturating_add(1)));
+                width = width.max(cl.max(cf.saturating_add(1)));
+            }
+            if matches!(
+                opcode,
+                0x0203 | 0x0204 | 0x00D6 | 0x0205 | 0x027E | 0x00FD | 0x0006 | 0x00BD
+            ) {
+                if body.len() < 4 {
+                    return Err(ConvertError::InvalidWorkbook);
+                }
+                let r = u16::from_le_bytes(body[0..2].try_into().unwrap()) as u32;
+                let c = if opcode == 0x00BD {
+                    u16::from_le_bytes(body[body.len() - 2..].try_into().unwrap()) as u32
+                } else {
+                    u16::from_le_bytes(body[2..4].try_into().unwrap()) as u32
+                };
+                height = height.max(r + 1);
+                width = width.max(c + 1);
+                records += 1;
+                if records > limits.max_cells {
+                    return Err(ConvertError::TooLarge("células XLS"));
+                }
+            }
+            check_extent(height, width, limits)?;
+            if opcode == EOF {
+                break;
+            }
+            pos += 4 + len;
+        }
+        total_cells += u64::from(height) * u64::from(width);
+        if total_cells > limits.max_cells {
+            return Err(ConvertError::TooLarge("abas XLS"));
+        }
+    }
+    Ok(())
 }
 
 /// Opcodes de BOF aceitos pelo xlrd (`bofcodes`: BIFF8, BIFF4, BIFF3, BIFF2).
@@ -106,6 +320,7 @@ const SHEET_TYPE_WORKSHEET: u8 = 0;
 ///
 /// Se qualquer passo falha, o xlrd levanta `XLRDError` e o pandas não
 /// converte o arquivo; o calamine aceitaria alguns desses arquivos.
+#[cfg(test)]
 fn xlrd_accepts_ole2(input: &[u8]) -> bool {
     let Ok(mut comp) = cfb::CompoundFile::open(Cursor::new(input)) else {
         return false;
@@ -220,7 +435,7 @@ fn build_grid(range: &Range<Data>, limits: Limits) -> Result<Grid, ConvertError>
         }
         let row = start_row as usize + r;
         let col = start_col as usize + c;
-        rows[row][col] = parse_cell(cell);
+        rows[row][col] = parse_cell(cell)?;
     }
     Ok(Grid {
         height,
@@ -230,8 +445,8 @@ fn build_grid(range: &Range<Data>, limits: Limits) -> Result<Grid, ConvertError>
 }
 
 /// `pandas/io/excel/_xlrd.py::_parse_cell`.
-fn parse_cell(cell: &Data) -> Value {
-    match cell {
+fn parse_cell(cell: &Data) -> Result<Value, ConvertError> {
+    Ok(match cell {
         Data::Empty => Value::Empty,
         Data::String(s) => Value::Str(s.clone()),
         Data::Float(f) => number(*f),
@@ -243,10 +458,35 @@ fn parse_cell(cell: &Data) -> Value {
             let is_1904 = workbook_is_1904(dt, serial);
             date_cell(serial, is_1904)
         }
-        // Datas e durações ISO só aparecem em .xlsx com o tipo "d", raro;
-        // o openpyxl as entrega como texto quando não reconhece o formato.
-        Data::DateTimeIso(s) | Data::DurationIso(s) => Value::Str(s.clone()),
+        Data::DateTimeIso(s) => parse_iso_date(s)?,
+        // Duração é um tipo distinto de data/hora; preserva o tratamento
+        // existente, sem reinterpretá-la como um horário do dia.
+        Data::DurationIso(s) => Value::Str(s.clone()),
+    })
+}
+
+/// XLSX `t="d"`: data/data-hora vira datetime, hora isolada vira time.
+/// O openpyxl lê a fração ISO com resolução de milissegundos.
+fn parse_iso_date(s: &str) -> Result<Value, ConvertError> {
+    let s = s.strip_suffix('Z').unwrap_or(s);
+    if let Some((date, time)) = s.split_once('T') {
+        let date = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .map_err(|_| ConvertError::InvalidWorkbook)?;
+        return Ok(Value::DateTime(date.and_time(parse_iso_time(time)?)));
     }
+    if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Ok(Value::DateTime(date.and_hms_opt(0, 0, 0).unwrap()));
+    }
+    Ok(Value::Time(parse_iso_time(s)?))
+}
+
+fn parse_iso_time(s: &str) -> Result<NaiveTime, ConvertError> {
+    let time = ["%H:%M:%S%.f", "%H:%M"]
+        .into_iter()
+        .find_map(|fmt| NaiveTime::parse_from_str(s, fmt).ok())
+        .ok_or(ConvertError::InvalidWorkbook)?;
+    time.with_nanosecond(time.nanosecond() / 1_000_000 * 1_000_000)
+        .ok_or(ConvertError::InvalidWorkbook)
 }
 
 /// Regra GH5394 do pandas: número finito com `int(x) == x` vira `int`.

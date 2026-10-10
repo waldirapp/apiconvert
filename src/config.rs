@@ -65,6 +65,12 @@ pub struct Config {
     pub token: String,
     pub max_body_bytes: usize,
     pub max_concurrent: usize,
+    /// Requisições de conversão admitidas, incluindo upload/fila/processamento.
+    pub max_inflight: usize,
+    pub upload_timeout: Duration,
+    /// Executável do worker em produção; None para uso em processo da biblioteca.
+    pub worker_path: Option<std::path::PathBuf>,
+    pub worker_memory_bytes: u64,
     pub timeout: Duration,
     pub limits: Limits,
     pub compat: CompatStore,
@@ -87,6 +93,9 @@ impl std::fmt::Debug for Config {
             .field("token", &"<oculto>")
             .field("max_body_bytes", &self.max_body_bytes)
             .field("max_concurrent", &self.max_concurrent)
+            .field("max_inflight", &self.max_inflight)
+            .field("upload_timeout", &self.upload_timeout)
+            .field("worker_memory_bytes", &self.worker_memory_bytes)
             .field("timeout", &self.timeout)
             .field("limits", &self.limits)
             .field("compat", &self.compat)
@@ -110,7 +119,11 @@ pub enum ConfigError {
 
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
-        Self::from_lookup(|k| std::env::var(k).ok())
+        let mut cfg = Self::from_lookup(|k| std::env::var(k).ok())?;
+        cfg.worker_path = Some(
+            std::env::current_exe().map_err(|_| ConfigError::Invalid("executável do worker"))?,
+        );
+        Ok(cfg)
     }
 
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
@@ -146,6 +159,17 @@ impl Config {
         let bind = parse_or(&get, "XLSCONVERT_BIND", default_bind)?;
         let max_body_mb: usize = parse_or(&get, "XLSCONVERT_MAX_BODY_MB", "20")?;
         let max_concurrent: usize = parse_or(&get, "XLSCONVERT_MAX_CONCURRENT", "2")?;
+        let default_inflight = max_concurrent
+            .checked_add(2)
+            .ok_or(ConfigError::Invalid("XLSCONVERT_MAX_CONCURRENT"))?;
+        let max_inflight: usize = parse_or(
+            &get,
+            "XLSCONVERT_MAX_INFLIGHT",
+            &default_inflight.to_string(),
+        )?;
+        let upload_timeout_secs: u64 = parse_or(&get, "XLSCONVERT_UPLOAD_TIMEOUT_SECS", "30")?;
+        let max_expanded_mb: u64 = parse_or(&get, "XLSCONVERT_MAX_EXPANDED_MB", "64")?;
+        let worker_memory_mb: u64 = parse_or(&get, "XLSCONVERT_WORKER_MEMORY_MB", "128")?;
         let timeout_secs: u64 = parse_or(&get, "XLSCONVERT_TIMEOUT_SECS", "60")?;
         let max_cells: u64 = parse_or(&get, "XLSCONVERT_MAX_CELLS", "5000000")?;
         let ttl_secs: u64 = parse_or(&get, "XLSCONVERT_COMPAT_TTL_SECS", "300")?;
@@ -162,6 +186,12 @@ impl Config {
         let ui_rate_per_min: u32 = parse_or(&get, "XLSCONVERT_UI_RATE_PER_MIN", "30")?;
         if max_body_mb == 0
             || max_concurrent == 0
+            || max_concurrent > tokio::sync::Semaphore::MAX_PERMITS
+            || max_inflight == 0
+            || max_inflight > tokio::sync::Semaphore::MAX_PERMITS
+            || upload_timeout_secs == 0
+            || max_expanded_mb == 0
+            || worker_memory_mb == 0
             || timeout_secs == 0
             || max_cells == 0
             || ttl_secs == 0
@@ -179,11 +209,22 @@ impl Config {
             mode,
             bind,
             token,
-            max_body_bytes: max_body_mb * 1024 * 1024,
+            max_body_bytes: max_body_mb
+                .checked_mul(1024 * 1024)
+                .ok_or(ConfigError::Invalid("XLSCONVERT_MAX_BODY_MB"))?,
             max_concurrent,
+            max_inflight,
+            upload_timeout: Duration::from_secs(upload_timeout_secs),
+            worker_path: None,
+            worker_memory_bytes: worker_memory_mb
+                .checked_mul(1024 * 1024)
+                .ok_or(ConfigError::Invalid("XLSCONVERT_WORKER_MEMORY_MB"))?,
             timeout: Duration::from_secs(timeout_secs),
             limits: Limits {
                 max_cells,
+                max_expanded_bytes: max_expanded_mb
+                    .checked_mul(1024 * 1024)
+                    .ok_or(ConfigError::Invalid("XLSCONVERT_MAX_EXPANDED_MB"))?,
                 ..Limits::default()
             },
             compat: CompatStore {
@@ -236,6 +277,26 @@ fn parse_or<T: std::str::FromStr>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn novos_limites_invalidos_nao_iniciam_servico() {
+        for key in [
+            "XLSCONVERT_MAX_INFLIGHT",
+            "XLSCONVERT_UPLOAD_TIMEOUT_SECS",
+            "XLSCONVERT_MAX_EXPANDED_MB",
+            "XLSCONVERT_WORKER_MEMORY_MB",
+        ] {
+            assert!(
+                Config::from_lookup(lookup(&[("XLSCONVERT_MODE", "apiconvert"), (key, "0")]))
+                    .is_err()
+            );
+        }
+        assert!(Config::from_lookup(lookup(&[
+            ("XLSCONVERT_MODE", "apiconvert"),
+            ("XLSCONVERT_MAX_INFLIGHT", "18446744073709551615")
+        ]))
+        .is_err());
+    }
 
     fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let owned: Vec<(String, String)> = pairs
