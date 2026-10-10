@@ -42,7 +42,12 @@ async fn main() {
     };
     tracing::info!(bind = %cfg.bind, modo = ?cfg.mode, versao = env!("CARGO_PKG_VERSION"), "xlsconvert iniciado");
 
-    if let Err(e) = axum::serve(listener, xlsconvert::router(cfg))
+    let ui = cfg.ui;
+    if ui {
+        tracing::info!("telas web ativas em / (XLSCONVERT_UI=0 desliga)");
+    }
+    let app = xlsconvert::router(cfg).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    if let Err(e) = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
     {

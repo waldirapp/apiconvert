@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="htmx-config" content='{"includeIndicatorCSS": false}'>
+  <title>{{ titulo }} · apiconvert</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topo">
+    <a class="marca" href="/">apiconvert</a>
+    <nav>
+      <a href="/planilha"{% if aba == "planilha" %} aria-current="page"{% endif %}>Planilha</a>
+      <a href="/imagem"{% if aba == "imagem" %} aria-current="page"{% endif %}>Imagem</a>
+    </nav>
+  </header>
+  <main>
+    {% block conteudo %}{% endblock %}
+  </main>
+  <footer class="rodape">
+    Os arquivos são convertidos em memória e não ficam guardados: o resultado fica disponível para download por {{ ttl_min }} minutos, só para quem enviou.
+  </footer>
+</body>
+</html>

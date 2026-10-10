@@ -51,6 +51,17 @@ Divergência intencional: imagem com transparência usa `-m 4` em vez de `-m 6`.
 
 Comparado com o `cwebp` 1.2.1 do legado nas mesmas 14 imagens (PNG e JPEG, de 32×32 a 3840×2160), as dimensões foram iguais em todas e o tamanho variou menos de 0,5%. Nas PNG o resultado decodificado foi idêntico pixel a pixel; nas JPEG a diferença vem do decodificador de JPEG, com PSNR entre as duas saídas de 36 a 46 dB. `examples/webp_fidelidade.rs` refaz a comparação.
 
+## Telas web
+
+No modo `apiconvert` o serviço também serve duas telas para testar as conversões no navegador, feitas com askama e htmx 4 e embutidas no binário:
+
+| Página | Uso |
+|---|---|
+| `/planilha` | Envia um `.xls`/`.xlsx`, mostra linhas, colunas, tempo e uma prévia das primeiras células, e baixa o `.xlsx` |
+| `/imagem` | Envia uma imagem, mostra o original e o WebP lado a lado, tamanho, redução, se houve transparência (método 4 ou 6), o base64 com botão de copiar, e baixa o `.webp` |
+
+As telas são abertas, sem login: não há segredo envolvido, e a conversão não acessa banco, disco nem outro serviço. O resultado fica em memória por 10 minutos e só pode ser baixado pelo id aleatório (128 bits) devolvido a quem enviou; a tela não lista conversões e não usa o download por nome do contrato legado. As conversões pela tela têm limite por IP (`XLSCONVERT_UI_RATE_PER_MIN`) e dividem o teto de conversões simultâneas com as rotas de planilha e imagem. As respostas levam `Content-Security-Policy` restritiva (só scripts e estilos do próprio serviço), `nosniff` e `frame-ancestors 'none'`.
+
 ## Fidelidade
 
 `tools/fidelidade/` compara o serviço com o pandas de referência, célula a célula, nos arquivos que se quer validar:
@@ -103,6 +114,8 @@ O serviço foi feito para ficar atrás de outro serviço na mesma máquina, que 
 | `XLSCONVERT_MAX_CELLS` | `5000000` | Teto de células da primeira aba |
 | `XLSCONVERT_LOG` | `info` | Filtro de log (`tracing`) |
 | `XLSCONVERT_WEBP_TOKEN` | — | Só no modo `apiconvert`: token da rota `/webp` (mínimo 32 caracteres). Sem ele a rota não é registrada |
+| `XLSCONVERT_UI` | `1` no `apiconvert`, `0` no `interno` | Liga ou desliga as telas web |
+| `XLSCONVERT_UI_RATE_PER_MIN` | `30` | Conversões por minuto, por IP, nas telas |
 | `XLSCONVERT_WEBP_MAX_PIXELS` | `25000000` (5000×5000; cabe com folga no `MemoryMax=1G` da unit com 2 conversões simultâneas) | Teto de largura × altura da imagem recebida em `/webp` |
 
 O log registra tamanho, duração e resultado, nunca o conteúdo nem o nome original do arquivo.

@@ -175,6 +175,7 @@ pub fn router(cfg: Config) -> Router {
     let max_body = cfg.max_body_bytes;
     let permits = Arc::new(Semaphore::new(cfg.max_concurrent));
     let imagem = crate::imagem_router(&cfg, permits.clone());
+    let ui = crate::ui_router(&cfg, permits.clone());
     let state = CompatState {
         permits,
         store: Arc::new(Store::new(cfg.compat)),
@@ -189,12 +190,12 @@ pub fn router(cfg: Config) -> Router {
         )
         .layer(DefaultBodyLimit::max(max_body))
         .with_state(state);
-    // A rota /webp (com token) entra antes do fallback de 404 do legado.
-    let router = match imagem {
-        Some(r) => router.merge(r),
-        None => router,
-    };
-    router.fallback(route_not_found)
+    // /webp (com token) e as telas entram antes do fallback de 404 do legado.
+    [imagem, ui]
+        .into_iter()
+        .flatten()
+        .fold(router, |acc, r| acc.merge(r))
+        .fallback(route_not_found)
 }
 
 /// Resposta em HTML com o `Content-Type` exato do legado.

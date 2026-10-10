@@ -22,6 +22,8 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 libwebp-sys = { version = "0.14", default-features = false, features = ["std"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "tiff", "webp", "ico"] }
 base64 = "0.22"
+askama = "0.16"
+getrandom = "0.4"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

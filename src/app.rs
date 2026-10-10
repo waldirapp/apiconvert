@@ -30,6 +30,7 @@ pub fn router(cfg: Config) -> Router {
     let max_body = cfg.max_body_bytes;
     let permits = Arc::new(Semaphore::new(cfg.max_concurrent));
     let imagem = crate::imagem_router(&cfg, permits.clone());
+    let ui = crate::ui_router(&cfg, permits.clone());
     let state = AppState {
         permits,
         cfg: Arc::new(cfg),
@@ -39,10 +40,10 @@ pub fn router(cfg: Config) -> Router {
         .route("/convert", post(convert_handler))
         .layer(DefaultBodyLimit::max(max_body))
         .with_state(state);
-    match imagem {
-        Some(r) => router.merge(r),
-        None => router,
-    }
+    [imagem, ui]
+        .into_iter()
+        .flatten()
+        .fold(router, |acc, r| acc.merge(r))
 }
 
 async fn health() -> Response {

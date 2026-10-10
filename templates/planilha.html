@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block conteudo %}
+<h1>Converter planilha</h1>
+<form class="envio" hx-post="/ui/planilha" hx-encoding="multipart/form-data" enctype="multipart/form-data"
+      hx-target="#resultado" hx-swap="innerHTML" hx-indicator="#carregando">
+  <label class="arquivo">
+    <span>Planilha <code>.xls</code> ou <code>.xlsx</code></span>
+    <input type="file" name="arquivo" accept=".xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required>
+  </label>
+  <button type="submit">Converter</button>
+  <span id="carregando" class="htmx-indicator">Convertendo…</span>
+</form>
+<section id="resultado" aria-live="polite"></section>
+{% endblock %}

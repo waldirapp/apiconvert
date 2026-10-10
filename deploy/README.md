@@ -68,6 +68,10 @@ journalctl -u xlsconvert-apiconvert -n 5 --no-pager   # "rota /webp ativa"
 
 O mesmo valor vai na configuração do cliente, que o envia no header `X-Internal-Token`.
 
+## Telas web
+
+Com o modo `apiconvert`, `http://<servidor>:9098/` abre as telas de teste de planilha e de imagem (ver o README principal). Para desligar, `XLSCONVERT_UI=0` em `/etc/xlsconvert/xlsconvert.env` e `systemctl restart xlsconvert-apiconvert`.
+
 ## Operação
 
 - Logs: `journalctl -u xlsconvert-apiconvert -f` (tamanho, duração e resultado de cada conversão; nunca o conteúdo nem o nome do arquivo).
