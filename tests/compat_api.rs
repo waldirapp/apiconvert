@@ -13,6 +13,46 @@ const XLS: &[u8] = include_bytes!("fixtures/tipos.xls");
 const XLSX_MIME: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 const BOUNDARY: &str = "----delphi-boundary";
 
+#[tokio::test]
+async fn head_consulta_metadados_sem_consumir_o_download() {
+    let app = app();
+    let (status, _, _) = send(&app, post_multipart(multipart("f", Some(b"head.xls"), XLS))).await;
+    assert_eq!(status, StatusCode::OK);
+    for _ in 0..2 {
+        let (status, headers, body) = send(
+            &app,
+            Request::head("/convert?file=head.xlsx")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(header(&headers, "content-type"), XLSX_MIME.as_bytes());
+        assert_eq!(
+            header(&headers, "content-disposition"),
+            b"attachment; filename=\"head.xlsx\""
+        );
+        assert!(body.is_empty());
+    }
+    let (status, _, body) = send(
+        &app,
+        Request::get("/convert?file=head.xlsx")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.starts_with(b"PK"));
+    let (status, _, _) = send(
+        &app,
+        Request::get("/convert?file=head.xlsx")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
 fn app() -> Router {
     let pairs = [("XLSCONVERT_MODE".to_string(), "apiconvert".to_string())];
     let cfg =

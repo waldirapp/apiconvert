@@ -46,6 +46,9 @@ pub(crate) fn write_xlsx(
         .set_align(FormatAlign::Top);
     let header_datetime_fmt = header_fmt.clone().set_num_format(DATETIME_FORMAT);
     let sheet = workbook.add_worksheet();
+    // O openpyxl escreve <v></v>: leitores data_only recebem nulo até o
+    // recálculo. O default 0 do rust_xlsxwriter inventaria um resultado.
+    sheet.set_formula_result_default("");
     sheet
         .set_name(SHEET_NAME)
         .map_err(|_| ConvertError::Write)?;
