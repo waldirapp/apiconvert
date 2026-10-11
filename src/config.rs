@@ -65,8 +65,10 @@ pub struct Config {
     pub token: String,
     pub max_body_bytes: usize,
     pub max_concurrent: usize,
-    /// Requisições de conversão admitidas, incluindo upload/fila/processamento.
+    /// Requisições de conversão admitidas, incluindo upload/fila/resposta.
     pub max_inflight: usize,
+    /// Cota por IP do peer; menor que a global quando há mais de uma vaga.
+    pub max_inflight_per_ip: usize,
     pub upload_timeout: Duration,
     /// Executável do worker em produção; None para uso em processo da biblioteca.
     pub worker_path: Option<std::path::PathBuf>,
@@ -94,6 +96,7 @@ impl std::fmt::Debug for Config {
             .field("max_body_bytes", &self.max_body_bytes)
             .field("max_concurrent", &self.max_concurrent)
             .field("max_inflight", &self.max_inflight)
+            .field("max_inflight_per_ip", &self.max_inflight_per_ip)
             .field("upload_timeout", &self.upload_timeout)
             .field("worker_memory_bytes", &self.worker_memory_bytes)
             .field("timeout", &self.timeout)
@@ -168,10 +171,22 @@ impl Config {
             &default_inflight.to_string(),
         )?;
         let upload_timeout_secs: u64 = parse_or(&get, "XLSCONVERT_UPLOAD_TIMEOUT_SECS", "30")?;
+        let default_per_ip = max_inflight.saturating_sub(1).clamp(1, 2);
+        let max_inflight_per_ip: usize = parse_or(
+            &get,
+            "XLSCONVERT_MAX_INFLIGHT_PER_IP",
+            &default_per_ip.to_string(),
+        )?;
+        // XLSX lê células incrementalmente, mas materializa a grade inteira.
+        // MAX_CELLS é um teto, não garantia de aceitação: expansão/texto e
+        // memória virtual do worker são limites independentes (sem derivação).
         let max_expanded_mb: u64 = parse_or(&get, "XLSCONVERT_MAX_EXPANDED_MB", "64")?;
         let worker_memory_mb: u64 = parse_or(&get, "XLSCONVERT_WORKER_MEMORY_MB", "128")?;
         let timeout_secs: u64 = parse_or(&get, "XLSCONVERT_TIMEOUT_SECS", "60")?;
         let max_cells: u64 = parse_or(&get, "XLSCONVERT_MAX_CELLS", "5000000")?;
+        // O calamine abre todas as abas XLS, inclusive gráficos/VB. Esse
+        // orçamento protege o parser sem somar abas à cota da primeira planilha.
+        let max_xls_parse_cells: u64 = parse_or(&get, "XLSCONVERT_MAX_XLS_PARSE_CELLS", "5000000")?;
         let ttl_secs: u64 = parse_or(&get, "XLSCONVERT_COMPAT_TTL_SECS", "300")?;
         let bind_ip = flag(&get, "XLSCONVERT_COMPAT_BIND_IP", true)?;
         let one_time = flag(&get, "XLSCONVERT_COMPAT_ONE_TIME", true)?;
@@ -189,11 +204,15 @@ impl Config {
             || max_concurrent > tokio::sync::Semaphore::MAX_PERMITS
             || max_inflight == 0
             || max_inflight > tokio::sync::Semaphore::MAX_PERMITS
+            || max_inflight_per_ip == 0
+            || max_inflight_per_ip > max_inflight
+            || (max_inflight > 1 && max_inflight_per_ip == max_inflight)
             || upload_timeout_secs == 0
             || max_expanded_mb == 0
             || worker_memory_mb == 0
             || timeout_secs == 0
             || max_cells == 0
+            || max_xls_parse_cells == 0
             || ttl_secs == 0
             || max_misses_per_min == 0
             || store_mb == 0
@@ -214,6 +233,7 @@ impl Config {
                 .ok_or(ConfigError::Invalid("XLSCONVERT_MAX_BODY_MB"))?,
             max_concurrent,
             max_inflight,
+            max_inflight_per_ip,
             upload_timeout: Duration::from_secs(upload_timeout_secs),
             worker_path: None,
             worker_memory_bytes: worker_memory_mb
@@ -222,6 +242,7 @@ impl Config {
             timeout: Duration::from_secs(timeout_secs),
             limits: Limits {
                 max_cells,
+                max_xls_parse_cells,
                 max_expanded_bytes: max_expanded_mb
                     .checked_mul(1024 * 1024)
                     .ok_or(ConfigError::Invalid("XLSCONVERT_MAX_EXPANDED_MB"))?,
@@ -279,9 +300,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cota_por_ip_reserva_capacidade_para_outros_clientes() {
+        for (global, expected) in [("1", 1), ("2", 1), ("4", 2)] {
+            let cfg = Config::from_lookup(lookup(&[
+                ("XLSCONVERT_MODE", "apiconvert"),
+                ("XLSCONVERT_MAX_INFLIGHT", global),
+            ]))
+            .unwrap();
+            assert_eq!(cfg.max_inflight_per_ip, expected);
+        }
+        assert!(Config::from_lookup(lookup(&[
+            ("XLSCONVERT_MODE", "apiconvert"),
+            ("XLSCONVERT_MAX_INFLIGHT", "4"),
+            ("XLSCONVERT_MAX_INFLIGHT_PER_IP", "4")
+        ]))
+        .is_err());
+    }
+
+    #[test]
     fn novos_limites_invalidos_nao_iniciam_servico() {
         for key in [
             "XLSCONVERT_MAX_INFLIGHT",
+            "XLSCONVERT_MAX_INFLIGHT_PER_IP",
+            "XLSCONVERT_MAX_XLS_PARSE_CELLS",
             "XLSCONVERT_UPLOAD_TIMEOUT_SECS",
             "XLSCONVERT_MAX_EXPANDED_MB",
             "XLSCONVERT_WORKER_MEMORY_MB",

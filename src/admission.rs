@@ -1,15 +1,17 @@
 //! Admissão compartilhada antes da leitura do corpo. Cada vaga cobre upload,
 //! espera e resposta, sem ocupar antecipadamente uma vaga de CPU.
+use std::collections::HashMap;
 use std::future::Future;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::task::{Context, Poll};
 
 use axum::body::{Body, Bytes};
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::Response;
@@ -24,6 +26,45 @@ use crate::config::{Config, Mode};
 struct Admission {
     cfg: Arc<Config>,
     permits: Arc<Semaphore>,
+    per_ip: Arc<Mutex<HashMap<Option<IpAddr>, usize>>>,
+}
+
+/// Uma aquisição corresponde a um incremento. A contagem acompanha upload,
+/// resposta e bytes enviados, e remove o IP quando a última vaga é liberada.
+struct AdmissionPermit {
+    _global: OwnedSemaphorePermit,
+    ip: Option<IpAddr>,
+    per_ip: Arc<Mutex<HashMap<Option<IpAddr>, usize>>>,
+}
+
+impl Drop for AdmissionPermit {
+    fn drop(&mut self) {
+        let mut counts = self.per_ip.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = counts.get_mut(&self.ip) {
+            *count -= 1;
+            if *count == 0 {
+                counts.remove(&self.ip);
+            }
+        }
+    }
+}
+
+impl Admission {
+    fn acquire(&self, ip: Option<IpAddr>) -> Option<Arc<AdmissionPermit>> {
+        // Apenas operações de memória, sem await/I/O sob o lock. Conferência
+        // e incremento são atômicos; falha global não deixa entrada por IP.
+        let mut counts = self.per_ip.lock().unwrap_or_else(|e| e.into_inner());
+        if counts.get(&ip).copied().unwrap_or(0) >= self.cfg.max_inflight_per_ip {
+            return None;
+        }
+        let permit = self.permits.clone().try_acquire_owned().ok()?;
+        *counts.entry(ip).or_default() += 1;
+        Some(Arc::new(AdmissionPermit {
+            _global: permit,
+            ip,
+            per_ip: self.per_ip.clone(),
+        }))
+    }
 }
 
 pub(crate) fn apply(router: Router, cfg: &Config) -> Router {
@@ -31,6 +72,7 @@ pub(crate) fn apply(router: Router, cfg: &Config) -> Router {
         Admission {
             cfg: Arc::new(cfg.clone()),
             permits: Arc::new(Semaphore::new(cfg.max_inflight)),
+            per_ip: Arc::new(Mutex::new(HashMap::new())),
         },
         admit,
     ))
@@ -71,7 +113,13 @@ async fn admit(State(st): State<Admission>, mut req: Request, next: Next) -> Res
             );
         }
     }
-    let Ok(permit) = st.permits.clone().try_acquire_owned() else {
+    // Usar somente o peer confirmado pelo servidor, sem confiar em headers
+    // X-Forwarded-For do cliente. Ausência de ConnectInfo compartilha a cota None.
+    let ip = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|peer| peer.0.ip());
+    let Some(permit) = st.acquire(ip) else {
         return failure(
             &st.cfg,
             &path,
@@ -99,10 +147,7 @@ async fn admit(State(st): State<Admission>, mut req: Request, next: Next) -> Res
         );
     }
     let body = std::mem::replace(response.body_mut(), Body::empty());
-    *response.body_mut() = Body::new(InFlightBody {
-        body,
-        permit: Arc::new(permit),
-    });
+    *response.body_mut() = Body::new(InFlightBody { body, permit });
     response
 }
 
@@ -110,12 +155,12 @@ async fn admit(State(st): State<Admission>, mut req: Request, next: Next) -> Res
 /// criar a resposta deixaria clientes lentos acumular resultados na memória.
 struct InFlightBody {
     body: Body,
-    permit: Arc<OwnedSemaphorePermit>,
+    permit: Arc<AdmissionPermit>,
 }
 
 struct InFlightBytes {
     bytes: Bytes,
-    _permit: Arc<OwnedSemaphorePermit>,
+    _permit: Arc<AdmissionPermit>,
 }
 
 impl AsRef<[u8]> for InFlightBytes {

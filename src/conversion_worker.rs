@@ -49,6 +49,7 @@ pub(crate) async fn run(
             &cfg.max_body_bytes.to_string(),
             &cfg.timeout.as_secs().to_string(),
             &(cfg.worker_memory_bytes / (1024 * 1024)).to_string(),
+            &limits.max_xls_parse_cells.to_string(),
         ])
         .env_clear()
         .stdin(Stdio::piped())
@@ -107,14 +108,15 @@ pub fn worker_entry() -> Option<i32> {
         return None;
     }
     let run = || -> Result<(), ()> {
-        if args.len() != 7 {
+        if args.len() != 8 {
             return Err(());
         }
         let numeric: Vec<u64> = args[2..]
             .iter()
             .map(|s| s.parse().map_err(|_| ()))
             .collect::<Result<_, _>>()?;
-        let [max_cells, max_expanded_bytes, max_input, timeout, memory_mb] = numeric.as_slice()
+        let [max_cells, max_expanded_bytes, max_input, timeout, memory_mb, max_xls_parse_cells] =
+            numeric.as_slice()
         else {
             return Err(());
         };
@@ -122,6 +124,7 @@ pub fn worker_entry() -> Option<i32> {
         set_memory_limit(memory)?;
         let limits = Limits {
             max_cells: *max_cells,
+            max_xls_parse_cells: *max_xls_parse_cells,
             max_expanded_bytes: *max_expanded_bytes,
             ..Limits::default()
         }

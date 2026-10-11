@@ -14,6 +14,291 @@ use xlsconvert::convert::{convert, ConvertError, Limits};
 
 const TOKEN: &str = "token-de-teste-com-mais-de-32-caracteres";
 
+fn from_ip(mut request: Request<Body>, last: u8) -> Request<Body> {
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [203, 0, 113, last],
+            12345,
+        ))));
+    request
+}
+
+#[tokio::test]
+async fn uploads_lentos_de_um_ip_nao_ocupam_todas_as_vagas() {
+    let app = xlsconvert::router(config(&[
+        ("XLSCONVERT_MODE", "apiconvert"),
+        ("XLSCONVERT_MAX_INFLIGHT", "4"),
+        ("XLSCONVERT_MAX_INFLIGHT_PER_IP", "2"),
+    ]));
+    let mut uploads = Vec::new();
+    for _ in 0..2 {
+        let started = Arc::new(Notify::new());
+        let signal = started.clone();
+        let body = Body::from_stream(stream::once(async move {
+            signal.notify_one();
+            std::future::pending::<Result<Bytes, std::io::Error>>().await
+        }));
+        uploads.push(tokio::spawn(
+            app.clone().oneshot(from_ip(
+                Request::post("/convert")
+                    .header("content-type", "multipart/form-data; boundary=r")
+                    .body(body)
+                    .unwrap(),
+                1,
+            )),
+        ));
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+    }
+    let request = || {
+        Request::post("/convert")
+            .header("content-type", "multipart/form-data; boundary=r")
+            .body(Body::from(multipart(include_bytes!("fixtures/tipos.xls"))))
+            .unwrap()
+    };
+    let excess = app.clone().oneshot(from_ip(request(), 1)).await.unwrap();
+    assert_eq!(excess.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let other_ip = app.clone().oneshot(from_ip(request(), 2)).await.unwrap();
+    assert_eq!(other_ip.status(), StatusCode::OK);
+    let cancelled = uploads.pop().unwrap();
+    cancelled.abort();
+    let _ = cancelled.await;
+    let same_ip = app.oneshot(from_ip(request(), 1)).await.unwrap();
+    assert_eq!(same_ip.status(), StatusCode::OK);
+    for upload in uploads {
+        upload.abort();
+        let _ = upload.await;
+    }
+}
+
+#[tokio::test]
+async fn cota_por_ip_acompanha_os_bytes_da_resposta() {
+    use http_body_util::BodyExt;
+    let app = xlsconvert::router(config(&[
+        ("XLSCONVERT_TOKEN", TOKEN),
+        ("XLSCONVERT_MAX_INFLIGHT", "4"),
+        ("XLSCONVERT_MAX_INFLIGHT_PER_IP", "1"),
+    ]));
+    let request = || {
+        Request::post("/convert")
+            .header("x-internal-token", TOKEN)
+            .body(Body::from(sheet((1, 0))))
+            .unwrap()
+    };
+    let first = app.clone().oneshot(from_ip(request(), 1)).await.unwrap();
+    let bytes = first.into_body().collect().await.unwrap().to_bytes();
+    let excess = app.clone().oneshot(from_ip(request(), 1)).await.unwrap();
+    assert_eq!(excess.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        app.clone()
+            .oneshot(from_ip(request(), 2))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    drop(bytes);
+    assert_eq!(
+        app.oneshot(from_ip(request(), 1)).await.unwrap().status(),
+        StatusCode::OK
+    );
+}
+
+/// Mantém os registros BIFF/SST da fixture e reconstrói BOUNDSHEET/offsets.
+/// Gráficos e módulos VB recebem substreams vazios; as planilhas recebem dados.
+fn xls_with_sheets(types: &[u8]) -> (Vec<u8>, u64) {
+    let mut compound =
+        cfb::CompoundFile::open(Cursor::new(include_bytes!("fixtures/tipos.xls"))).unwrap();
+    let mut input = Vec::new();
+    compound
+        .open_stream("/Workbook")
+        .unwrap()
+        .read_to_end(&mut input)
+        .unwrap();
+    let mut globals = Vec::new();
+    let mut sheet_offset = None;
+    let mut pos = 0;
+    while pos + 4 <= input.len() {
+        let opcode = u16::from_le_bytes(input[pos..pos + 2].try_into().unwrap());
+        let len = u16::from_le_bytes(input[pos + 2..pos + 4].try_into().unwrap()) as usize;
+        let end = pos + 4 + len;
+        if opcode == 0x0085 {
+            if input[pos + 9] == 0 && sheet_offset.is_none() {
+                sheet_offset =
+                    Some(u32::from_le_bytes(input[pos + 4..pos + 8].try_into().unwrap()) as usize);
+            }
+        } else if opcode == 0x000A {
+            break;
+        } else {
+            globals.extend_from_slice(&input[pos..end]);
+        }
+        pos = end;
+    }
+    let start = sheet_offset.unwrap();
+    pos = start;
+    let mut extent = 0;
+    loop {
+        let opcode = u16::from_le_bytes(input[pos..pos + 2].try_into().unwrap());
+        let len = u16::from_le_bytes(input[pos + 2..pos + 4].try_into().unwrap()) as usize;
+        if opcode == 0x0200 && len == 14 {
+            let rows = u32::from_le_bytes(input[pos + 8..pos + 12].try_into().unwrap()) as u64;
+            let cols = u16::from_le_bytes(input[pos + 14..pos + 16].try_into().unwrap()) as u64;
+            extent = extent.max(rows * cols);
+        }
+        pos += 4 + len;
+        if opcode == 0x000A {
+            break;
+        }
+    }
+    assert!(extent > 0);
+    let sheet = &input[start..pos];
+    let bof_len = 4 + u16::from_le_bytes(sheet[2..4].try_into().unwrap()) as usize;
+    let streams: Vec<Vec<u8>> = types
+        .iter()
+        .map(|typ| {
+            if *typ == 0 {
+                sheet.to_vec()
+            } else {
+                let mut stream = sheet[..bof_len].to_vec();
+                stream[6..8].copy_from_slice(
+                    &(if *typ == 2 { 0x0020u16 } else { 0x0006u16 }).to_le_bytes(),
+                );
+                stream.extend_from_slice(&[0x0A, 0, 0, 0]);
+                stream
+            }
+        })
+        .collect();
+    // BOUNDSHEET BIFF8: 8 bytes fixos + nome ASCII de 1 byte + header de 4.
+    let mut offset = globals.len() + types.len() * 13 + 4;
+    for (i, typ) in types.iter().enumerate() {
+        globals.extend_from_slice(&[0x85, 0, 9, 0]);
+        globals.extend_from_slice(&(offset as u32).to_le_bytes());
+        globals.extend_from_slice(&[0, *typ, 1, 0, b'A' + i as u8]);
+        offset += streams[i].len();
+    }
+    globals.extend_from_slice(&[0x0A, 0, 0, 0]);
+    for stream in streams {
+        globals.extend_from_slice(&stream);
+    }
+    let mut output =
+        cfb::CompoundFile::create_with_version(cfb::Version::V3, Cursor::new(Vec::new())).unwrap();
+    output
+        .create_stream("/Workbook")
+        .unwrap()
+        .write_all(&globals)
+        .unwrap();
+    (output.into_inner().into_inner(), extent)
+}
+
+#[test]
+fn xls_max_cells_nao_e_a_soma_das_abas() {
+    use calamine::{Reader, Xls};
+    let (input, extent) = xls_with_sheets(&[0, 0, 0]);
+    let mut wb = Xls::new(Cursor::new(&input)).unwrap();
+    assert_eq!(wb.sheet_names().len(), 3);
+    assert!(!wb.worksheet_range_at(0).unwrap().unwrap().is_empty());
+    let limits = Limits {
+        max_cells: extent + 1,
+        ..Limits::default()
+    };
+    assert!(extent * 3 > limits.max_cells);
+    assert!(
+        convert(&input, limits).is_ok(),
+        "somente a primeira aba consome MAX_CELLS"
+    );
+}
+
+#[test]
+fn xls_grafico_e_vba_antes_da_planilha_nao_sao_convertidos() {
+    use calamine::{Reader, Xlsx};
+    let (input, extent) = xls_with_sheets(&[2, 6, 0]);
+    let out = convert(
+        &input,
+        Limits {
+            max_cells: extent + 1,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    let mut wb = Xlsx::new(Cursor::new(out)).unwrap();
+    assert!(!wb.worksheet_range_at(0).unwrap().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn xls_tem_orcamento_independente_para_abrir_todas_as_abas() {
+    use http_body_util::BodyExt;
+    let (input, extent) = xls_with_sheets(&[0, 0, 0]);
+    let parser_limit = (extent * 2).to_string();
+    let mut cfg = config(&[
+        ("XLSCONVERT_TOKEN", TOKEN),
+        ("XLSCONVERT_MAX_XLS_PARSE_CELLS", &parser_limit),
+    ]);
+    assert!(matches!(
+        convert(&input, cfg.limits),
+        Err(ConvertError::TooLarge("abas XLS"))
+    ));
+    cfg.worker_path = Some(env!("CARGO_BIN_EXE_xlsconvert").into());
+    let request = || {
+        Request::post("/convert")
+            .header("x-internal-token", TOKEN)
+            .body(Body::from(input.clone()))
+            .unwrap()
+    };
+    let response = xlsconvert::router(cfg.clone())
+        .oneshot(request())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains("abas XLS"));
+    cfg.limits.max_xls_parse_cells = extent * 3;
+    assert_eq!(
+        xlsconvert::router(cfg)
+            .oneshot(request())
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[test]
+fn fronteiras_de_celulas_e_expansao_sao_independentes() {
+    let input = sheet((1, 1));
+    let mut zip = zip::ZipArchive::new(Cursor::new(&input)).unwrap();
+    let expanded = (0..zip.len())
+        .map(|i| zip.by_index(i).unwrap().size())
+        .sum::<u64>();
+    let limits = Limits {
+        max_cells: 4,
+        max_expanded_bytes: expanded,
+        ..Limits::default()
+    };
+    assert!(convert(&input, limits).is_ok());
+    assert!(matches!(
+        convert(
+            &input,
+            Limits {
+                max_cells: 3,
+                ..limits
+            }
+        ),
+        Err(ConvertError::TooLarge("células"))
+    ));
+    assert!(matches!(
+        convert(
+            &input,
+            Limits {
+                max_expanded_bytes: expanded - 1,
+                ..limits
+            }
+        ),
+        Err(ConvertError::TooLarge("expansão ZIP"))
+    ));
+}
+
 #[tokio::test]
 async fn resposta_pendente_mantem_a_vaga_de_memoria() {
     use http_body_util::BodyExt;
@@ -71,6 +356,7 @@ fn worker_sem_rede_converte_pela_entrada_padrao() {
             "20971520",
             "60",
             "512",
+            "5000000",
         ])
         .env_clear()
         .stdin(Stdio::piped())
@@ -102,7 +388,9 @@ async fn abort_do_worker_nao_derruba_o_servidor_nem_prende_a_vaga() {
         ("XLSCONVERT_MAX_CONCURRENT", "1"),
     ]);
     cfg.worker_path = Some(env!("CARGO_BIN_EXE_xlsconvert").into());
-    cfg.worker_memory_bytes = 128 * 1024 * 1024;
+    assert_eq!(cfg.worker_memory_bytes, 128 * 1024 * 1024);
+    assert_eq!(cfg.limits.max_cells, 5_000_000);
+    assert!(4_000_000 < cfg.limits.max_cells);
     let app = xlsconvert::router(cfg);
     let response = app
         .clone()

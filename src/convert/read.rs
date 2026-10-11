@@ -18,7 +18,7 @@
 
 use std::io::{Cursor, Read};
 
-use calamine::{Data, DataRef, Range, Reader, Xls, Xlsx};
+use calamine::{Data, DataRef, Range, Reader, SheetType, Xls, Xlsx};
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 
 use super::{ConvertError, Limits, Value};
@@ -189,7 +189,8 @@ fn read_xlsx_bounded(input: &[u8], limits: Limits) -> Result<Grid, ConvertError>
 }
 
 /// O XLS abre todas as abas e reserva a grade de DIMENSIONS antes de devolver
-/// a primeira. Conferir esses registros e as coordenadas antes de Xls::new.
+/// a primeira. A cota da conversão vale para dados da primeira planilha;
+/// DIMENSIONS e todas as abas usam o orçamento separado da abertura XLS.
 fn validate_xls_allocations(input: &[u8], limits: Limits) -> Result<(), ConvertError> {
     let mut comp =
         cfb::CompoundFile::open(Cursor::new(input)).map_err(|_| ConvertError::InvalidWorkbook)?;
@@ -226,7 +227,12 @@ fn validate_xls_allocations(input: &[u8], limits: Limits) -> Result<(), ConvertE
             .ok_or(ConvertError::InvalidWorkbook)?;
         if opcode == BOUNDSHEET {
             let offset = body.get(..4).ok_or(ConvertError::InvalidWorkbook)?;
-            offsets.push(u32::from_le_bytes(offset.try_into().unwrap()) as usize);
+            let is_worksheet =
+                *body.get(5).ok_or(ConvertError::InvalidWorkbook)? == SHEET_TYPE_WORKSHEET;
+            offsets.push((
+                u32::from_le_bytes(offset.try_into().unwrap()) as usize,
+                is_worksheet,
+            ));
         }
         if opcode == EOF {
             break;
@@ -234,9 +240,17 @@ fn validate_xls_allocations(input: &[u8], limits: Limits) -> Result<(), ConvertE
         pos += 4 + len;
     }
     let mut total_cells = 0u64;
-    for offset in offsets {
+    let mut first_worksheet_seen = false;
+    let parser_limits = Limits {
+        max_cells: limits.max_xls_parse_cells,
+        ..limits
+    };
+    for (offset, is_worksheet) in offsets {
+        let converted_sheet = is_worksheet && !first_worksheet_seen;
+        first_worksheet_seen |= is_worksheet;
         pos = offset;
         let (mut height, mut width) = (0u32, 0u32);
+        let (mut data_height, mut data_width) = (0u32, 0u32);
         let mut records = 0u64;
         while let Some((opcode, len)) = record_header(&data, pos) {
             limits.check_deadline()?;
@@ -280,19 +294,27 @@ fn validate_xls_allocations(input: &[u8], limits: Limits) -> Result<(), ConvertE
                 };
                 height = height.max(r + 1);
                 width = width.max(c + 1);
+                data_height = data_height.max(r + 1);
+                data_width = data_width.max(c + 1);
+                if converted_sheet {
+                    check_extent(data_height, data_width, limits)?;
+                }
                 records += 1;
-                if records > limits.max_cells {
+                if records > limits.max_xls_parse_cells {
                     return Err(ConvertError::TooLarge("células XLS"));
                 }
             }
-            check_extent(height, width, limits)?;
+            check_extent(height, width, parser_limits).map_err(|error| match error {
+                ConvertError::TooLarge("células") => ConvertError::TooLarge("células XLS"),
+                other => other,
+            })?;
             if opcode == EOF {
                 break;
             }
             pos += 4 + len;
         }
         total_cells += u64::from(height) * u64::from(width);
-        if total_cells > limits.max_cells {
+        if total_cells > limits.max_xls_parse_cells {
             return Err(ConvertError::TooLarge("abas XLS"));
         }
     }
@@ -394,11 +416,15 @@ where
     R: std::io::Read + std::io::Seek,
     W: Reader<R>,
 {
-    match wb.worksheet_range_at(0) {
-        Some(Ok(range)) => Ok(range),
-        Some(Err(_)) => Err(ConvertError::InvalidWorkbook),
-        None => Err(ConvertError::NoSheet),
-    }
+    let name = wb
+        .sheets_metadata()
+        .iter()
+        .find(|sheet| sheet.typ == SheetType::WorkSheet)
+        .ok_or(ConvertError::NoSheet)?
+        .name
+        .clone();
+    wb.worksheet_range(&name)
+        .map_err(|_| ConvertError::InvalidWorkbook)
 }
 
 fn build_grid(range: &Range<Data>, limits: Limits) -> Result<Grid, ConvertError> {

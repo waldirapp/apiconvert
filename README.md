@@ -111,11 +111,13 @@ O serviço foi feito para ficar atrás de outro serviço na mesma máquina, que 
 | `XLSCONVERT_MAX_BODY_MB` | `20` | Tamanho máximo do upload |
 | `XLSCONVERT_MAX_CONCURRENT` | `2` | Conversões simultâneas, somando planilha e imagem |
 | `XLSCONVERT_MAX_INFLIGHT` | `MAX_CONCURRENT + 2` | Requisições admitidas, somando upload, espera, conversão e envio da resposta de todas as rotas. O excesso é recusado antes de ler o corpo |
+| `XLSCONVERT_MAX_INFLIGHT_PER_IP` | `2` (`1` se o limite global for 1 ou 2) | Cota simultânea por IP do peer, compartilhada pelas rotas de conversão e mantida até liberar os bytes da resposta. Com mais de uma vaga global, precisa ser menor que o teto global |
 | `XLSCONVERT_UPLOAD_TIMEOUT_SECS` | `30` | Prazo total para receber o corpo de um upload; não é o prazo de conversão |
 | `XLSCONVERT_MAX_EXPANDED_MB` | `64` | Teto da expansão total do ZIP, do fluxo XLS e do texto materializado nas células XLSX |
 | `XLSCONVERT_WORKER_MEMORY_MB` | `128` | Linux/Unix: teto de memória virtual do processo auxiliar de conversão de planilha |
 | `XLSCONVERT_TIMEOUT_SECS` | `60` | Tempo máximo de resposta de uma conversão |
-| `XLSCONVERT_MAX_CELLS` | `5000000` | Teto de células da primeira aba |
+| `XLSCONVERT_MAX_CELLS` | `5000000` | Teto da extensão de células da primeira aba de planilha convertida; as demais abas não são somadas a essa cota |
+| `XLSCONVERT_MAX_XLS_PARSE_CELLS` | `5000000` | Orçamento separado da soma de extensões/reservas de todas as abas na abertura XLS pelo calamine, incluindo gráficos e módulos VB |
 | `XLSCONVERT_LOG` | `info` | Filtro de log (`tracing`) |
 | `XLSCONVERT_WEBP_TOKEN` | — | Só no modo `apiconvert`: token da rota `/webp` (mínimo 32 caracteres). Sem ele a rota não é registrada |
 | `XLSCONVERT_COMPAT_TTL_SECS` | `300` | Modo `apiconvert`: validade do resultado para o `GET` |
@@ -129,6 +131,10 @@ O serviço foi feito para ficar atrás de outro serviço na mesma máquina, que 
 O log registra tamanho, duração e resultado, nunca o conteúdo nem o nome original do arquivo.
 
 As planilhas são convertidas em um processo auxiliar do mesmo binário, sem rede e sem arquivos temporários. O auxiliar recebe somente o arquivo e limites numéricos; não herda os tokens do servidor. Um abort ou estouro de memória do parser é recusado sem encerrar o servidor, e o timeout encerra o auxiliar. O limite de memória do auxiliar é aplicado em Linux/Unix; a unit systemd continua limitando a memória total do serviço, incluindo filhos. Na API interna, excesso de recursos retorna `413`; no modo legado, mantém `500` com `Erro ao gravar o arquivo`.
+
+Esses limites são independentes: ficar abaixo de `MAX_CELLS` não garante aceitação. A leitura XLSX é incremental, mas a grade inteira `height × width` é materializada antes da inferência. Uma planilha esparsa de 2000×2000 ocupa 4 milhões de células de extensão, abaixo do teto padrão de 5 milhões, mas excede a memória padrão de 128 MiB do auxiliar. Expansão ZIP/texto e orçamento da abertura XLS também podem recusar arquivos abaixo da cota da primeira aba. Nenhum desses limites é derivado automaticamente dos demais.
+
+A cota por IP usa `ConnectInfo`, sem confiar em `X-Forwarded-For` enviado pelo cliente. NAT/proxy fazem clientes compartilhar uma cota; ajustar os tetos por IP e global em conjunto. Com apenas uma vaga global, não há capacidade simultânea reservada para outro IP.
 
 `HEAD /convert?file=<nome>` consulta os metadados sem consumir o resultado. O `GET` mantém as proteções de IP, expiração e uso único.
 

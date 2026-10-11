@@ -56,6 +56,8 @@ pub struct Limits {
     pub max_rows: u32,
     pub max_cols: u32,
     pub max_cells: u64,
+    /// Orçamento separado da abertura de todas as abas XLS pelo calamine.
+    pub max_xls_parse_cells: u64,
     /// Teto da expansão ZIP e do texto materializado nas células.
     pub max_expanded_bytes: u64,
     /// Prazo da conversão. Verificado dentro dos laços de leitura, inferência
@@ -88,6 +90,7 @@ impl Default for Limits {
             max_rows: 1_048_576,
             max_cols: 16_384,
             max_cells: 5_000_000,
+            max_xls_parse_cells: 5_000_000,
             max_expanded_bytes: 64 * 1024 * 1024,
             deadline: None,
         }
