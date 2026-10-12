@@ -48,7 +48,7 @@ jobs:
           B=target/x86_64-unknown-linux-musl/release/xlsconvert
           file "$B"
           file "$B" | grep -q "static"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: xlsconvert-x86_64-linux-musl
           path: target/x86_64-unknown-linux-musl/release/xlsconvert
