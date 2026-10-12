@@ -7,6 +7,9 @@ fn main() {
     if let Some(code) = xlsconvert::conversion_worker::worker_entry() {
         std::process::exit(code);
     }
+    if let Some(code) = xlsconvert::media_worker::worker_entry() {
+        std::process::exit(code);
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

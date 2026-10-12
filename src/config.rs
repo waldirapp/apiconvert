@@ -73,6 +73,8 @@ pub struct Config {
     /// Executável do worker em produção; None para uso em processo da biblioteca.
     pub worker_path: Option<std::path::PathBuf>,
     pub worker_memory_bytes: u64,
+    /// Teto de memória virtual dos auxiliares de imagem e prévia (Linux/Unix).
+    pub media_worker_memory_bytes: u64,
     pub timeout: Duration,
     pub limits: Limits,
     pub compat: CompatStore,
@@ -99,6 +101,7 @@ impl std::fmt::Debug for Config {
             .field("max_inflight_per_ip", &self.max_inflight_per_ip)
             .field("upload_timeout", &self.upload_timeout)
             .field("worker_memory_bytes", &self.worker_memory_bytes)
+            .field("media_worker_memory_bytes", &self.media_worker_memory_bytes)
             .field("timeout", &self.timeout)
             .field("limits", &self.limits)
             .field("compat", &self.compat)
@@ -193,6 +196,8 @@ impl Config {
         let max_misses_per_min: u32 = parse_or(&get, "XLSCONVERT_COMPAT_MAX_MISSES_PER_MIN", "30")?;
         let store_mb: usize = parse_or(&get, "XLSCONVERT_COMPAT_MAX_STORE_MB", "256")?;
         let max_entries: usize = parse_or(&get, "XLSCONVERT_COMPAT_MAX_ENTRIES", "2000")?;
+        let media_worker_memory_mb: u64 =
+            parse_or(&get, "XLSCONVERT_MEDIA_WORKER_MEMORY_MB", "512")?;
         let webp_max_pixels: u64 = parse_or(&get, "XLSCONVERT_WEBP_MAX_PIXELS", "25000000")?;
         // Telas: ligadas por padrão no modo apiconvert (já exposto), desligadas
         // no interno (só para o serviço chamador).
@@ -210,6 +215,7 @@ impl Config {
             || upload_timeout_secs == 0
             || max_expanded_mb == 0
             || worker_memory_mb == 0
+            || media_worker_memory_mb == 0
             || timeout_secs == 0
             || max_cells == 0
             || max_xls_parse_cells == 0
@@ -239,6 +245,9 @@ impl Config {
             worker_memory_bytes: worker_memory_mb
                 .checked_mul(1024 * 1024)
                 .ok_or(ConfigError::Invalid("XLSCONVERT_WORKER_MEMORY_MB"))?,
+            media_worker_memory_bytes: media_worker_memory_mb
+                .checked_mul(1024 * 1024)
+                .ok_or(ConfigError::Invalid("XLSCONVERT_MEDIA_WORKER_MEMORY_MB"))?,
             timeout: Duration::from_secs(timeout_secs),
             limits: Limits {
                 max_cells,

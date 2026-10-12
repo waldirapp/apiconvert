@@ -153,7 +153,7 @@ pub fn worker_entry() -> Option<i32> {
 }
 
 #[cfg(unix)]
-fn set_memory_limit(bytes: u64) -> Result<(), ()> {
+pub(crate) fn set_memory_limit(bytes: u64) -> Result<(), ()> {
     let limit = libc::rlimit {
         rlim_cur: bytes as libc::rlim_t,
         rlim_max: bytes as libc::rlim_t,
@@ -174,7 +174,7 @@ fn set_memory_limit(bytes: u64) -> Result<(), ()> {
 }
 
 #[cfg(not(unix))]
-fn set_memory_limit(_: u64) -> Result<(), ()> {
+pub(crate) fn set_memory_limit(_: u64) -> Result<(), ()> {
     Ok(())
 }
 

@@ -15,7 +15,6 @@
 //! de planilha e imagem.
 
 use std::collections::HashMap;
-use std::io::Cursor;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -29,20 +28,17 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use base64::Engine;
-use calamine::Reader;
 use tokio::sync::Semaphore;
 
 use crate::app::XLSX_MIME;
 use crate::config::Config;
+use crate::media_worker::{self, WorkerError};
 use crate::webp::{self, WebpParams, MAX_SIDE_LIMIT};
 
 /// Tempo que um resultado fica disponível para download.
 pub const UI_TTL: Duration = Duration::from_secs(10 * 60);
 const UI_MAX_BYTES: usize = 128 * 1024 * 1024;
 const UI_MAX_ENTRIES: usize = 500;
-/// Linhas e colunas da prévia da planilha.
-const PREVIA_LINHAS: usize = 30;
-const PREVIA_COLUNAS: usize = 20;
 
 const HTMX_JS: &[u8] = include_bytes!("../assets/htmx.min.js");
 const APP_JS: &[u8] = include_bytes!("../assets/app.js");
@@ -482,26 +478,20 @@ fn tamanho(bytes: usize) -> String {
     }
 }
 
-async fn executar<T: Send + 'static>(
-    timeout: Duration,
-    permit: tokio::sync::OwnedSemaphorePermit,
-    tarefa: impl FnOnce() -> T + Send + 'static,
-) -> Result<T, Falha> {
-    let job = tokio::task::spawn_blocking(move || {
-        // A vaga só é liberada quando a conversão termina, mesmo após o prazo.
-        let _permit = permit;
-        tarefa()
-    });
-    match tokio::time::timeout(timeout, job).await {
-        Ok(Ok(r)) => Ok(r),
-        Ok(Err(_)) => Err(Falha(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Falha interna na conversão.",
-        )),
-        Err(_) => Err(Falha(
+fn worker_failure(e: WorkerError) -> Falha {
+    match e {
+        WorkerError::Timeout => Falha(
             StatusCode::GATEWAY_TIMEOUT,
             "A conversão excedeu o tempo limite.",
-        )),
+        ),
+        WorkerError::TooLarge => Falha(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Resultado grande demais para processar.",
+        ),
+        _ => Falha(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Falha interna na conversão.",
+        ),
     }
 }
 
@@ -529,18 +519,13 @@ async fn converter_planilha(State(st): State<UiState>, req: Request) -> Response
             let converted =
                 crate::conversion_worker::run(arquivo, limits, &st.cfg, permit.clone()).await;
             match converted {
-                Ok(x) => tokio::task::spawn_blocking(move || {
-                    let _permit = permit;
-                    let p = previa(&x);
-                    Ok((x, p))
-                })
-                .await
-                .map_err(|_| {
-                    Falha(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Falha interna na conversão.",
-                    )
-                }),
+                Ok(x) => {
+                    let x = Bytes::from(x);
+                    let p = media_worker::preview(x.clone(), &st.cfg, permit)
+                        .await
+                        .map_err(worker_failure)?;
+                    Ok::<_, Falha>(Ok((x, p)))
+                }
                 Err(e) => Ok(Err(e)),
             }
         })
@@ -571,10 +556,7 @@ async fn converter_planilha(State(st): State<UiState>, req: Request) -> Response
     );
 
     let bytes_saida = tamanho(saida.len());
-    let Some(id) = st
-        .resultados
-        .guardar(XLSX_MIME, nome.clone(), Bytes::from(saida))
-    else {
+    let Some(id) = st.resultados.guardar(XLSX_MIME, nome.clone(), saida) else {
         return erro(
             StatusCode::INSUFFICIENT_STORAGE,
             "Resultado grande demais para guardar.",
@@ -595,42 +577,6 @@ async fn converter_planilha(State(st): State<UiState>, req: Request) -> Response
         },
         StatusCode::OK,
     )
-}
-
-/// Tamanho da aba e as primeiras células do `.xlsx` gerado, como texto.
-fn previa(xlsx: &[u8]) -> (usize, usize, Vec<Vec<String>>, bool, usize) {
-    let Ok(mut wb) = calamine::Xlsx::new(Cursor::new(xlsx)) else {
-        return (0, 0, Vec::new(), false, 0);
-    };
-    let Some(Ok(range)) = wb.worksheet_range_at(0) else {
-        return (0, 0, Vec::new(), false, 0);
-    };
-    let (linhas, colunas) = range.get_size();
-    let colunas_previa = colunas.min(PREVIA_COLUNAS);
-    let celulas: Vec<Vec<String>> = range
-        .rows()
-        .take(PREVIA_LINHAS)
-        .map(|r| r.iter().take(colunas_previa).map(texto_celula).collect())
-        .collect();
-    let cortada = linhas > PREVIA_LINHAS || colunas > PREVIA_COLUNAS;
-    (linhas, colunas, celulas, cortada, colunas_previa)
-}
-
-/// Texto da célula na prévia; data e hora como o Excel mostra o formato
-/// gravado (`YYYY-MM-DD HH:MM:SS`), não o número serial.
-fn texto_celula(c: &calamine::Data) -> String {
-    match c {
-        calamine::Data::DateTime(d) => d
-            .as_datetime()
-            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-            .unwrap_or_else(|| c.to_string()),
-        _ => c.to_string(),
-    }
-}
-
-/// O WebP tem canal alfa: cabeçalho `VP8X` com o bit de alfa (0x10).
-fn webp_tem_alfa(webp: &[u8]) -> bool {
-    webp.len() > 20 && &webp[12..16] == b"VP8X" && webp[20] & 0x10 != 0
 }
 
 fn primeira_maiuscula(s: &str) -> String {
@@ -680,23 +626,24 @@ async fn converter_imagem(State(st): State<UiState>, req: Request) -> Response {
     let stem = nome.rfind('.').map_or(nome.as_str(), |i| &nome[..i]);
     let nome_saida = format!("{stem}.webp");
     let entrada = form.arquivo.len();
-    let max_pixels = st.cfg.webp_max_pixels;
     let inicio = Instant::now();
     let arquivo = form.arquivo;
-    // Dimensões pelos cabeçalhos e base64 na mesma tarefa, com a vaga e o prazo.
-    let r = executar(st.cfg.timeout, permit, move || {
-        let orig = webp::dimensions(&arquivo);
-        webp::to_webp(&arquivo, &params, max_pixels).map(|out| {
-            let dims = webp::dimensions(&out);
-            let alfa = webp_tem_alfa(&out);
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&out);
-            (orig, dims, alfa, b64, out)
-        })
-    })
-    .await;
+    let r = media_worker::image(arquivo, params, &st.cfg, Arc::new(permit)).await;
     let ((orig, dims, transparente, base64, out), tempo_ms) = match r {
-        Ok(Ok(v)) => (v, inicio.elapsed().as_millis()),
-        Ok(Err(e)) => {
+        Ok(output) => {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&output.bytes);
+            (
+                (
+                    output.info.original,
+                    output.info.dimensions,
+                    output.info.transparent,
+                    b64,
+                    output.bytes,
+                ),
+                inicio.elapsed().as_millis(),
+            )
+        }
+        Err(WorkerError::Image(e)) => {
             tracing::info!(bytes = entrada, "tela: imagem recusada: {e}");
             let status = match e {
                 webp::WebpError::Param(_) | webp::WebpError::Empty => StatusCode::BAD_REQUEST,
@@ -706,7 +653,7 @@ async fn converter_imagem(State(st): State<UiState>, req: Request) -> Response {
             };
             return erro(status, &primeira_maiuscula(&e.to_string()));
         }
-        Err(r) => return r.into_response(),
+        Err(e) => return worker_failure(e).into_response(),
     };
     tracing::info!(
         bytes = entrada,
