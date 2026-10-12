@@ -111,9 +111,29 @@ fn image_request(bytes: Vec<u8>, uri: &str) -> Request<Body> {
         .body(Body::from(bytes))
         .unwrap()
 }
+/// XLSX sintético independente do leitor BIFF e das fixtures em disco.
+fn synthetic_workbook() -> Vec<u8> {
+    let mut workbook = rust_xlsxwriter::Workbook::new();
+    let sheet = workbook.add_worksheet();
+    sheet.write_string(0, 0, "Nome").unwrap();
+    sheet.write_string(0, 1, "Data").unwrap();
+    sheet.write_string(0, 2, "Valor").unwrap();
+    let date_format = rust_xlsxwriter::Format::new().set_num_format("yyyy-mm-dd hh:mm:ss");
+    for row in 1..=40 {
+        sheet
+            .write_string(row, 0, format!("Produto {row}"))
+            .unwrap();
+        sheet
+            .write_number_with_format(row, 1, 46305.5, &date_format)
+            .unwrap();
+        sheet.write_number(row, 2, f64::from(row) + 0.25).unwrap();
+    }
+    workbook.save_to_buffer().unwrap()
+}
+
 fn spreadsheet_request() -> Request<Body> {
-    let mut body = b"--isolated\r\nContent-Disposition: form-data; name=\"arquivo\"; filename=\"teste.xls\"\r\n\r\n".to_vec();
-    body.extend_from_slice(include_bytes!("fixtures/tipos.xls"));
+    let mut body = b"--isolated\r\nContent-Disposition: form-data; name=\"arquivo\"; filename=\"teste.xlsx\"\r\n\r\n".to_vec();
+    body.extend_from_slice(&synthetic_workbook());
     body.extend_from_slice(b"\r\n--isolated--\r\n");
     Request::post("/ui/planilha")
         .header("content-type", "multipart/form-data; boundary=isolated")
@@ -210,9 +230,7 @@ async fn previa_isolada_preserva_html_e_download() {
     let bytes = response_bytes(r).await;
     assert!(bytes.starts_with(b"PK"));
     // O conteúdo também mantém o resultado da conversão direta.
-    let expected =
-        xlsconvert::convert::convert(include_bytes!("fixtures/tipos.xls"), Default::default())
-            .unwrap();
+    let expected = xlsconvert::convert::convert(&synthetic_workbook(), Default::default()).unwrap();
     use calamine::Reader;
     let mut wb = calamine::Xlsx::new(Cursor::new(bytes)).unwrap();
     let mut reference = calamine::Xlsx::new(Cursor::new(expected)).unwrap();
@@ -222,7 +240,7 @@ async fn previa_isolada_preserva_html_e_download() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod unix {
     use super::*;
     use std::{
