@@ -23,14 +23,17 @@ use base64::Engine;
 use tokio::sync::Semaphore;
 
 use crate::app::{error, token_ok};
-use crate::webp::{self, WebpError, WebpParams};
+use crate::webp::{WebpError, WebpParams};
+use crate::{
+    config::Config,
+    media_worker::{self, WorkerError},
+};
 
 #[derive(Clone)]
 struct ImagemState {
     token: Arc<str>,
     permits: Arc<Semaphore>,
-    timeout: Duration,
-    max_pixels: u64,
+    cfg: Arc<Config>,
 }
 
 /// Rotas de imagem; `token` é o que o header `X-Internal-Token` precisa trazer.
@@ -43,11 +46,24 @@ pub fn router(
     timeout: Duration,
     max_pixels: u64,
 ) -> Router {
+    let mut cfg = Config::from_lookup(|key| {
+        (key == "XLSCONVERT_TOKEN").then(|| "x".repeat(crate::config::MIN_TOKEN_LEN))
+    })
+    .expect("token interno válido");
+    cfg.token = token.to_owned();
+    cfg.webp_token = Some(token.to_owned());
+    cfg.max_body_bytes = max_body;
+    cfg.timeout = timeout;
+    cfg.webp_max_pixels = max_pixels;
+    router_with_config(cfg, permits)
+}
+
+pub(crate) fn router_with_config(cfg: Config, permits: Arc<Semaphore>) -> Router {
+    let max_body = cfg.max_body_bytes;
     let state = ImagemState {
-        token: Arc::from(token),
+        token: Arc::from(cfg.webp_token.as_deref().unwrap_or("")),
         permits,
-        timeout,
-        max_pixels,
+        cfg: Arc::new(cfg),
     };
     Router::new()
         .route("/webp", post(webp_handler))
@@ -159,17 +175,11 @@ async fn webp_handler(State(st): State<ImagemState>, req: Request) -> Response {
 
     let started = Instant::now();
     let size = bytes.len();
-    let max_pixels = st.max_pixels;
-    let job = tokio::task::spawn_blocking(move || {
-        // A vaga só é liberada quando a conversão termina, mesmo após 504.
-        let _permit = permit;
-        webp::to_webp(&bytes, &params, max_pixels)
-    });
-    let outcome = tokio::time::timeout(st.timeout, job).await;
+    let outcome = media_worker::image(bytes, params, &st.cfg, Arc::new(permit)).await;
     let elapsed_ms = started.elapsed().as_millis();
 
     match outcome {
-        Err(_) => {
+        Err(WorkerError::Timeout) => {
             tracing::warn!(bytes = size, elapsed_ms, "webp excedeu o tempo limite");
             error(
                 StatusCode::GATEWAY_TIMEOUT,
@@ -177,7 +187,7 @@ async fn webp_handler(State(st): State<ImagemState>, req: Request) -> Response {
                 "conversão excedeu o tempo limite",
             )
         }
-        Ok(Err(_)) => {
+        Err(WorkerError::Failed) => {
             tracing::error!(bytes = size, elapsed_ms, "falha interna no webp");
             error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -185,12 +195,18 @@ async fn webp_handler(State(st): State<ImagemState>, req: Request) -> Response {
                 "falha interna na conversão",
             )
         }
-        Ok(Ok(Err(e))) => {
+        Err(WorkerError::Image(e)) => {
             let (status, code) = classify(&e);
             tracing::info!(bytes = size, elapsed_ms, codigo = code, "webp recusado");
             error(status, code, &e.to_string())
         }
-        Ok(Ok(Ok(out))) => {
+        Err(WorkerError::TooLarge) => error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "imagem_grande_demais",
+            "imagem grande demais",
+        ),
+        Ok(output) => {
+            let out = output.bytes;
             tracing::info!(
                 bytes = size,
                 saida = out.len(),

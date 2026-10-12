@@ -36,7 +36,7 @@ Divergência conhecida: o openpyxl grava como célula do tipo erro o texto que �
 
 ## Imagem em WebP (`POST /webp`)
 
-Converte uma imagem em WebP com o resultado do `cwebp` que o x-duall usa (`cwebp -q 50 -m 6 -jpeg_like -mt -resize`, exceto `-m 4` em imagem com transparência, ver abaixo; com o lado maior em 400 px e o outro proporcional; imagem quadrada vai a 400×400 e imagem menor é ampliada) e devolve o WebP em base64, o formato que o x-duall grava no campo da imagem. A libwebp é compilada dentro do binário; não há processo externo.
+Converte uma imagem em WebP com o resultado do `cwebp` que o x-duall usa (`cwebp -q 50 -m 6 -jpeg_like -mt -resize`, exceto `-m 4` em imagem com transparência, ver abaixo; com o lado maior em 400 px e o outro proporcional; imagem quadrada vai a 400×400 e imagem menor é ampliada) e devolve o WebP em base64, o formato que o x-duall grava no campo da imagem. A libwebp é compilada dentro do binário; a API executa a conversão em um processo auxiliar do mesmo executável.
 
 | Item | Contrato |
 |---|---|
@@ -115,6 +115,7 @@ O serviço foi feito para ficar atrás de outro serviço na mesma máquina, que 
 | `XLSCONVERT_UPLOAD_TIMEOUT_SECS` | `30` | Prazo total para receber o corpo de um upload; não é o prazo de conversão |
 | `XLSCONVERT_MAX_EXPANDED_MB` | `64` | Teto da expansão total do ZIP, do fluxo XLS e do texto materializado nas células XLSX |
 | `XLSCONVERT_WORKER_MEMORY_MB` | `128` | Linux/Unix: teto de memória virtual do processo auxiliar de conversão de planilha |
+| `XLSCONVERT_MEDIA_WORKER_MEMORY_MB` | `512` | Linux/Unix: teto de memória virtual de cada auxiliar de imagem e prévia |
 | `XLSCONVERT_TIMEOUT_SECS` | `60` | Tempo máximo de resposta de uma conversão |
 | `XLSCONVERT_MAX_CELLS` | `5000000` | Teto da extensão de células da primeira aba de planilha convertida; as demais abas não são somadas a essa cota |
 | `XLSCONVERT_MAX_XLS_PARSE_CELLS` | `5000000` | Orçamento separado da soma de extensões/reservas de todas as abas na abertura XLS pelo calamine, incluindo gráficos e módulos VB |
@@ -137,6 +138,8 @@ Esses limites são independentes: ficar abaixo de `MAX_CELLS` não garante aceit
 A cota por IP usa `ConnectInfo`, sem confiar em `X-Forwarded-For` enviado pelo cliente. NAT/proxy fazem clientes compartilhar uma cota; ajustar os tetos por IP e global em conjunto. Com apenas uma vaga global, não há capacidade simultânea reservada para outro IP.
 
 `HEAD /convert?file=<nome>` consulta os metadados sem consumir o resultado. O `GET` mantém as proteções de IP, expiração e uso único.
+
+As imagens e a prévia da planilha também são processadas por auxiliares do mesmo binário. Decodificação, dimensões, transparência e leitura das células ficam no filho. Os pipes têm teto de entrada e saída. O auxiliar não herda as variáveis de ambiente do servidor; timeout e cancelamento encerram e coletam o filho antes de liberar sua vaga. As rotas, base64 WebP, qualidade, prévia de 30 linhas por 20 colunas e downloads mantêm o contrato atual. O orçamento da tela de planilha inclui conversão e prévia; os limites da unit systemd continuam abrangendo todos os processos.
 
 Os testes de regressão são escritos em Rust, com fixtures sintéticas e valores esperados fixos; a suíte e o serviço não precisam de Python ou pandas. `tools/fidelidade/` continua sendo uma ferramenta opcional para comparação externa.
 

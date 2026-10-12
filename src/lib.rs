@@ -26,14 +26,8 @@ pub(crate) fn imagem_router(
     cfg: &config::Config,
     permits: std::sync::Arc<tokio::sync::Semaphore>,
 ) -> Option<Router> {
-    let token = cfg.webp_token.as_deref()?;
-    Some(imagem::router(
-        token,
-        cfg.max_body_bytes,
-        permits,
-        cfg.timeout,
-        cfg.webp_max_pixels,
-    ))
+    cfg.webp_token.as_deref()?;
+    Some(imagem::router_with_config(cfg.clone(), permits))
 }
 
 /// Telas web, quando ligadas, com o semáforo das conversões.
@@ -51,5 +45,6 @@ pub mod config;
 pub mod conversion_worker;
 pub mod convert;
 pub mod imagem;
+pub mod media_worker;
 pub mod ui;
 pub mod webp;

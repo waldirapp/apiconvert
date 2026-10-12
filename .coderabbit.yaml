@@ -2,7 +2,7 @@
 language: pt-BR
 reviews:
   profile: assertive
-  request_changes_workflow: false
+  request_changes_workflow: true
   high_level_summary: true
   poem: false
   auto_review:
